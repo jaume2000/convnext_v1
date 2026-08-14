@@ -60,6 +60,8 @@ fi
 # shellcheck disable=SC1091
 source "${VENV_PATH}/bin/activate"
 
+# Ignore ~/.local pip installs (they conflict with cineca-ai torch/torchvision).
+export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
@@ -69,6 +71,7 @@ echo "Python: $(which python)"
 echo "Account: ${SLURM_ACCOUNT:-unset}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Start: $(date)"
+python -c "import torch, torchvision; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})')"
 
 srun python scripts/train.py
 
