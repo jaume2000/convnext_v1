@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 from data.testingDataset import TestingDataset
 from data.transforms.transforms import build_train_batch_transforms
 from metrics.metricHistory import Metrichistory
 from metrics.top1acc import Top1AccMetric
+
 
 class Trainer():
 
@@ -21,7 +23,8 @@ class Trainer():
     val_loader: torch.utils.data.DataLoader,
     batch_transforms,
     device: torch.device,
-    num_classes: int = 1000):
+    num_classes: int = 1000,
+    amp: bool = True):
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
@@ -31,22 +34,35 @@ class Trainer():
         self.device = device
         self.batch_transforms = batch_transforms
         self.num_classes = num_classes
+        self.amp = amp and device.type == "cuda"
+        self.scaler = GradScaler("cuda", enabled=self.amp)
+
     def train_epoch(self, train_histoy_metrics: Metrichistory):
         self.model.train()
         self.model.to(self.device)
         train_histoy_metrics.create_point()
         pbar = tqdm(self.train_loader)
         for batch, y_labels in pbar:
-            self.optimizer.zero_grad()
-            batch = batch.to(self.device)
-            y_labels = y_labels.to(self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+            batch = batch.to(self.device, non_blocking=True)
+            y_labels = y_labels.to(self.device, non_blocking=True)
             batch, y_labels = self.batch_transforms(batch, y_labels)
-            pred = self.model(batch)
-            loss = self.criterion(pred, y_labels)
-            loss.backward()
-            self.optimizer.step()
-            train_histoy_metrics.accumulate_last_point(pred, y_labels, loss)
-            pbar.set_postfix(loss=loss.item())
+            with autocast("cuda", enabled=self.amp):
+                pred = self.model(batch)
+                loss = self.criterion(pred, y_labels)
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            train_histoy_metrics.accumulate_last_point(pred.float(), y_labels, loss.detach().float())
+            postfix = {"loss": f"{loss.item():.3f}", "amp": int(self.amp)}
+            if self.device.type == "cuda":
+                # YOLO-style: reserved VRAM per visible GPU (GiB).
+                mem = " ".join(
+                    f"{torch.cuda.memory_reserved(i) / (1024 ** 3):.1f}G"
+                    for i in range(torch.cuda.device_count())
+                )
+                postfix["vram"] = mem
+            pbar.set_postfix(postfix)
         train_histoy_metrics.print_last()
 
     # Validate for classification
@@ -57,12 +73,13 @@ class Trainer():
         val_histoy_metrics.create_point()
         with torch.inference_mode():
             for batch, y_labels in pbar:
-                batch = batch.to(self.device)
+                batch = batch.to(self.device, non_blocking=True)
                 y_labels = torch.nn.functional.one_hot(y_labels, num_classes=self.num_classes).float()
-                y_labels = y_labels.to(self.device)
-                pred = self.model(batch)
-                loss = self.criterion(pred, y_labels)
-                val_histoy_metrics.accumulate_last_point(pred, y_labels, loss)
+                y_labels = y_labels.to(self.device, non_blocking=True)
+                with autocast("cuda", enabled=self.amp):
+                    pred = self.model(batch)
+                    loss = self.criterion(pred, y_labels)
+                val_histoy_metrics.accumulate_last_point(pred.float(), y_labels, loss.detach().float())
                 pbar.set_postfix(loss=loss.item())
             val_histoy_metrics.print_last()
 
@@ -109,6 +126,7 @@ def main():
         batch_transforms=batch_transforms,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         num_classes=num_classes,
+        amp=True,
     )
     trainer.fit(epochs=10)
 
