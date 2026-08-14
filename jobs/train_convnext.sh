@@ -10,11 +10,18 @@
 #SBATCH --output=logs/train_convnext_%j.out
 #SBATCH --error=logs/train_convnext_%j.err
 
-# Use source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_convnext.sh
+# Submit from the repo root:
+#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_convnext.sh
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Under SLURM, BASH_SOURCE can point at a spool copy of this script.
+# SLURM_SUBMIT_DIR is the directory where sbatch was invoked (repo root).
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+else
+  PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
   set -a
@@ -34,7 +41,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
-mkdir -p logs
+mkdir -p "${PROJECT_ROOT}/logs"
 
 module purge
 module load profile/deeplrn
@@ -44,6 +51,7 @@ export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
 echo "Host: $(hostname)"
+echo "Project: ${PROJECT_ROOT}"
 echo "Account: ${SLURM_ACCOUNT:-unset}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Start: $(date)"

@@ -22,7 +22,7 @@ trainer = Trainer(
     model=model,
     optimizer=AdamW(model.parameters(), lr=4e-3, betas=(0.9, 0.999), weight_decay=0.05),
     criterion=SoftTargetCrossEntropy(),
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device=torch.device("cuda:0,1,2,3"),
     train_loader=train_loader,
     val_loader=val_loader,
     batch_transforms=build_train_batch_transforms(),
