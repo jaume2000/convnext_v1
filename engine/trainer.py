@@ -86,7 +86,8 @@ class Trainer():
 
     def save_model(self, name: str):
         Path(f"outputs/{self.experiment_name}/weights").mkdir(parents=True, exist_ok=True)
-        torch.save(self.model.state_dict(), Path(f"outputs/{self.experiment_name}/weights/{name}.pth"))
+        state = self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
+        torch.save(state, Path(f"outputs/{self.experiment_name}/weights/{name}.pth"))
 
 def main():
     num_classes = 4

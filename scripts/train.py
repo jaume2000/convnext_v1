@@ -6,8 +6,12 @@ from engine.trainer import Trainer
 from torch.optim import AdamW
 from timm.loss import SoftTargetCrossEntropy
 import torch
+import torch.nn as nn
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ConvNextV1()
+if device.type == "cuda" and torch.cuda.device_count() > 1:
+    model = nn.DataParallel(model)
 
 # train loader and val loader of imagenet with huggingface datasets
 
@@ -22,11 +26,11 @@ trainer = Trainer(
     model=model,
     optimizer=AdamW(model.parameters(), lr=4e-3, betas=(0.9, 0.999), weight_decay=0.05),
     criterion=SoftTargetCrossEntropy(),
-    device=torch.device("cuda:0,1,2,3"),
+    device=device,
     train_loader=train_loader,
     val_loader=val_loader,
     batch_transforms=build_train_batch_transforms(),
-    num_classes=1000
+    num_classes=1000,
 )
 
 trainer.fit(600)
