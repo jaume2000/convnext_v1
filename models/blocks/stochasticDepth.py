@@ -12,8 +12,7 @@ class StochasticDepth(nn.Module):
             return x
         shape = (x.shape[0],) + (1,) * (len(x.shape)-1)
         maskTensor = (self.keepProb + torch.rand(shape, dtype=x.dtype, device=x.device)).floor()
-        maskTensor /= self.keepProb # Estimation now is scaled up to 1.
-        print(maskTensor.view((8,)))
+        maskTensor /= self.keepProb  # Estimation now is scaled up to 1.
         return maskTensor * x
 
 if __name__ == "__main__":
