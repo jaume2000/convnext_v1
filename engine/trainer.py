@@ -3,8 +3,19 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
-from torch.amp import GradScaler, autocast
 from tqdm import tqdm
+
+# torch.amp.GradScaler exists on newer PyTorch; cineca-ai 4.1 only has torch.cuda.amp.
+try:
+    from torch.amp import GradScaler, autocast
+except ImportError:
+    import torch.cuda.amp as _cuda_amp
+
+    def autocast(device_type="cuda", enabled=True, **kwargs):
+        return _cuda_amp.autocast(enabled=enabled, **kwargs)
+
+    def GradScaler(device="cuda", enabled=True, **kwargs):
+        return _cuda_amp.GradScaler(enabled=enabled, **kwargs)
 
 from data.testingDataset import TestingDataset
 from data.transforms.transforms import build_train_batch_transforms
