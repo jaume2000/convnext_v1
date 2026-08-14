@@ -14,8 +14,8 @@ model = ConvNextV1()
 train_dataset = ImageNetDataset(split="train", transforms=build_train_transforms())
 val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
 
-train_loader = DataLoader(train_dataset, batch_size=224, shuffle=True, num_workers=4, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=224, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, num_workers=8, drop_last=True)
+val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=8)
 
 trainer = Trainer(
     experiment_name="convnextv1_imagenet",
