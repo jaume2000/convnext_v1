@@ -48,9 +48,10 @@ module load profile/deeplrn
 module load cineca-ai
 
 # Expand ~ / $HOME from .env, then activate the project venv.
+VENV_PATH="${VENV_PATH:-$HOME/venvs/convnext}"
 VENV_PATH="${VENV_PATH/#\~/$HOME}"
-if [[ -z "${VENV_PATH:-}" || ! -f "${VENV_PATH}/bin/activate" ]]; then
-  echo "Venv not found at '${VENV_PATH:-}'. Create it on a login node:" >&2
+if [[ ! -f "${VENV_PATH}/bin/activate" ]]; then
+  echo "Venv not found at '${VENV_PATH}'. Create it on a login node:" >&2
   echo "  module load profile/deeplrn && module load cineca-ai" >&2
   echo "  python -m venv --system-site-packages \"\$HOME/venvs/convnext\"" >&2
   echo "  source \"\$HOME/venvs/convnext/bin/activate\" && pip install timm" >&2
