@@ -41,11 +41,38 @@ class Metrichistory:
             for i, metric in enumerate(self.metricHistory):
                 writer.writerow([i, metric.compute_metric(), metric.compute_loss()])
 
-    def load(self):
-        Path(self.path / "history").mkdir(parents=True, exist_ok=True)
-        Path(self.path / "results").mkdir(parents=True, exist_ok=True)
-        with open(self.path / "history" / f"{self.name}_history.pkl", "rb") as f:
+    def history_path(self) -> Path:
+        return self.path / "history" / f"{self.name}_history.pkl"
+
+    def load(self) -> bool:
+        path = self.history_path()
+        if not path.is_file():
+            return False
+        with open(path, "rb") as f:
             self.metricHistory = pickle.load(f)
+        return True
+
+    def drop_empty_trailing(self):
+        while self.metricHistory and self.metricHistory[-1].total_samples == 0:
+            self.metricHistory.pop()
+
+    def truncate(self, n: int):
+        self.metricHistory = self.metricHistory[:n]
+
+    def restore_best(self):
+        if not self.metricHistory:
+            self.best_metric = None
+            self.best_metric_index = None
+            return
+        best_i = 0
+        best_v = self.metricHistory[0].compute_metric()
+        for i, metric in enumerate(self.metricHistory):
+            value = metric.compute_metric()
+            if value > best_v:
+                best_v = value
+                best_i = i
+        self.best_metric = best_v
+        self.best_metric_index = best_i
 
     def plot_history(self):
         Path(self.path / "plots").mkdir(parents=True, exist_ok=True)

@@ -47,12 +47,14 @@ class Trainer():
         self.num_classes = num_classes
         self.amp = amp and device.type == "cuda"
         self.scaler = GradScaler("cuda", enabled=self.amp)
+        self.experiment_path = Path(f"outputs/{self.experiment_name}")
+        self.weights_path = self.experiment_path / "weights"
 
-    def train_epoch(self, train_histoy_metrics: Metrichistory):
+    def train_epoch(self, train_histoy_metrics: Metrichistory, epoch: int, epochs: int):
         self.model.train()
         self.model.to(self.device)
         train_histoy_metrics.create_point()
-        pbar = tqdm(self.train_loader)
+        pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}")
         for batch, y_labels in pbar:
             self.optimizer.zero_grad(set_to_none=True)
             batch = batch.to(self.device, non_blocking=True)
@@ -77,10 +79,10 @@ class Trainer():
         train_histoy_metrics.print_last()
 
     # Validate for classification
-    def validate(self, val_histoy_metrics: Metrichistory):
+    def validate(self, val_histoy_metrics: Metrichistory, epoch: int, epochs: int):
         self.model.eval()
         self.model.to(self.device)
-        pbar = tqdm(self.val_loader)
+        pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}")
         val_histoy_metrics.create_point()
         with torch.inference_mode():
             for batch, y_labels in pbar:
@@ -94,28 +96,71 @@ class Trainer():
                 pbar.set_postfix(loss=loss.item())
             val_histoy_metrics.print_last()
 
+    def _load_checkpoint(self, name: str = "last"):
+        path = self.weights_path / f"{name}.pth"
+        if not path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        ckpt = torch.load(path, map_location="cpu")
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            state = ckpt["model"]
+            epoch = ckpt.get("epoch")
+        else:
+            # Legacy raw state_dict checkpoints.
+            state = ckpt
+            epoch = None
+        target = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        target.load_state_dict(state)
+        return epoch
 
-    def fit(self, epochs):
-        train_histoy_metrics = Metrichistory(Path(f"outputs/{self.experiment_name}"), Top1AccMetric, "train")
-        val_histoy_metrics = Metrichistory(Path(f"outputs/{self.experiment_name}"), Top1AccMetric, "val")
-        for epoch in range(epochs):
-            self.train_epoch(train_histoy_metrics)
-            self.validate(val_histoy_metrics)
+    def _retake(self, train_histoy_metrics: Metrichistory, val_histoy_metrics: Metrichistory) -> int:
+        ckpt_name = "last" if (self.weights_path / "last.pth").is_file() else "best"
+        ckpt_epoch = self._load_checkpoint(ckpt_name)
+        train_loaded = train_histoy_metrics.load()
+        val_loaded = val_histoy_metrics.load()
+        if not train_loaded or not val_loaded:
+            raise FileNotFoundError(
+                f"retake=True requires train/val history under {self.experiment_path / 'history'}"
+            )
+
+        train_histoy_metrics.drop_empty_trailing()
+        val_histoy_metrics.drop_empty_trailing()
+
+        if ckpt_epoch is not None:
+            start_epoch = ckpt_epoch + 1
+        else:
+            start_epoch = min(len(train_histoy_metrics.metricHistory), len(val_histoy_metrics.metricHistory))
+
+        train_histoy_metrics.truncate(start_epoch)
+        val_histoy_metrics.truncate(start_epoch)
+        val_histoy_metrics.restore_best()
+        train_histoy_metrics.save()
+        val_histoy_metrics.save()
+        print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
+        return start_epoch
+
+    def fit(self, epochs, retake: bool = False):
+        train_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "train")
+        val_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "val")
+        start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if retake else 0
+        for epoch in range(start_epoch, epochs):
+            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
+            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)
             if val_histoy_metrics.last_is_best():
-                self.save_model(name=f"best")
+                self.save_model(name="best", epoch=epoch)
+            self.save_model(name="last", epoch=epoch)
         train_histoy_metrics.save()
         val_histoy_metrics.save()
         train_histoy_metrics.plot_history()
         val_histoy_metrics.plot_history()
         train_histoy_metrics.plot_history_loss()
         val_histoy_metrics.plot_history_loss()
-        self.save_model(name="last")
         return train_histoy_metrics, val_histoy_metrics
 
-    def save_model(self, name: str):
-        Path(f"outputs/{self.experiment_name}/weights").mkdir(parents=True, exist_ok=True)
+    def save_model(self, name: str, epoch=None):
+        self.weights_path.mkdir(parents=True, exist_ok=True)
         state = self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
-        torch.save(state, Path(f"outputs/{self.experiment_name}/weights/{name}.pth"))
+        payload = {"model": state, "epoch": epoch} if epoch is not None else state
+        torch.save(payload, self.weights_path / f"{name}.pth")
 
 def main():
     num_classes = 4

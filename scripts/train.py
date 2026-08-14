@@ -54,4 +54,4 @@ trainer = Trainer(
     amp=True,
 )
 
-trainer.fit(600)
+trainer.fit(600, retake=False)
