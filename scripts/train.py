@@ -25,7 +25,7 @@ val_dataset = ImageNetDataset(split="validation", transforms=build_val_transform
 
 train_loader = DataLoader(
     train_dataset,
-    batch_size=256,
+    batch_size=1024,
     shuffle=True,
     num_workers=16,
     pin_memory=True,
@@ -34,7 +34,7 @@ train_loader = DataLoader(
 )
 val_loader = DataLoader(
     val_dataset,
-    batch_size=256,
+    batch_size=1024,
     shuffle=False,
     num_workers=16,
     pin_memory=True,
