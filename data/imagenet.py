@@ -4,7 +4,7 @@ from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from PIL import Image
 from torchvision.transforms.functional import to_pil_image
 
-from transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_transforms
+from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_transforms
 
 class ImageNetDataset(Dataset):
     def __init__(self, split, transforms=None, streaming=False):
