@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class LayerNorm2d(nn.Module):
@@ -9,11 +10,14 @@ class LayerNorm2d(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(num_channels))
         self.bias = nn.Parameter(torch.zeros(num_channels))
+        self.normalized_shape = (num_channels,)
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [N, C, H, W]
-        mean = x.mean(dim=1, keepdim=True)
-        var = (x - mean).pow(2).mean(dim=1, keepdim=True)
-        x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.weight[:, None, None] * x + self.bias[:, None, None]
+        # x: [N, C, H, W]. Viewing it as NHWC puts the normalized axis last, which lets
+        # F.layer_norm run as one fused kernel instead of ~8 elementwise passes; both
+        # permutes are stride-only no-ops when x is channels_last. F.layer_norm also
+        # keeps the statistics in fp32 under autocast, unlike a manual mean/var.
+        x = x.permute(0, 2, 3, 1)
+        x = F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+        return x.permute(0, 3, 1, 2)

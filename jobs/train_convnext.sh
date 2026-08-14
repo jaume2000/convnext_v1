@@ -3,7 +3,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=24
+# Booster nodes are 32 cores / 4 GPUs; asking for fewer just idles dataloader cores.
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -65,7 +66,9 @@ fi
 # Ignore ~/.local pip installs (they conflict with cineca-ai torch/torchvision).
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+# The main process only feeds the GPUs; dataloader workers are single-threaded anyway
+# (torch pins them to 1 thread), and idle OpenMP threads spin-wait and steal their cores.
+export OMP_NUM_THREADS=2
 
 # Hugging Face: compute nodes are offline. Point at the existing cache
 # (parent of ILSVRC___imagenet-1k), e.g. $WORK/huggingface on Leonardo.
@@ -96,6 +99,8 @@ echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
-srun python scripts/train.py
+# Override to profile instead of train:
+#   TRAIN_SCRIPT=scripts/bench.py sbatch --time=00:30:00 --account="$SLURM_ACCOUNT" jobs/train_convnext.sh
+srun python "${TRAIN_SCRIPT:-scripts/train.py}"
 
 echo "End: $(date)"

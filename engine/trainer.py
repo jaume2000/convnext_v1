@@ -21,6 +21,7 @@ from data.testingDataset import TestingDataset
 from data.transforms.transforms import build_train_batch_transforms
 from metrics.metricHistory import Metrichistory
 from metrics.top1acc import Top1AccMetric
+from optim.cosineSchedule import CosineWithWarmup
 
 
 class Trainer():
@@ -35,10 +36,15 @@ class Trainer():
     batch_transforms,
     device: torch.device,
     num_classes: int = 1000,
-    amp: bool = True):
+    amp: bool = True,
+    amp_dtype: str = "auto",
+    channels_last: bool = True,
+    log_every: int = 20,
+    scheduler=None):
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
+        self.scheduler = scheduler          # Stepped per iteration, may be None
         self.criterion = criterion          # Loss function
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -46,54 +52,92 @@ class Trainer():
         self.batch_transforms = batch_transforms
         self.num_classes = num_classes
         self.amp = amp and device.type == "cuda"
-        self.scaler = GradScaler("cuda", enabled=self.amp)
+        self.amp_dtype = self._resolve_amp_dtype(amp_dtype)
+        # fp16 needs loss scaling; bf16 has the same exponent range as fp32 and does not,
+        # which also removes the per-step inf check (a host sync) that GradScaler does.
+        self.scaler = GradScaler("cuda", enabled=self.amp and self.amp_dtype == torch.float16)
+        # Depthwise 7x7 convs and channel-wise LayerNorm both prefer NHWC on tensor cores.
+        self.channels_last = channels_last and device.type == "cuda"
+        self.log_every = log_every
         self.experiment_path = Path(f"outputs/{self.experiment_name}")
         self.weights_path = self.experiment_path / "weights"
+        if device.type == "cuda":
+            # Shapes are fixed (drop_last=True), so autotuning conv algos pays off.
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        self._prepare_model()
+
+    def _resolve_amp_dtype(self, amp_dtype: str) -> torch.dtype:
+        if amp_dtype == "auto":
+            bf16_ok = self.amp and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+            return torch.bfloat16 if bf16_ok else torch.float16
+        return {"bf16": torch.bfloat16, "fp16": torch.float16}[amp_dtype]
+
+    def _prepare_model(self):
+        self.model.to(self.device)
+        if self.channels_last:
+            self.model.to(memory_format=torch.channels_last)
+
+    def _to_device(self, batch: torch.Tensor) -> torch.Tensor:
+        batch = batch.to(self.device, non_blocking=True)
+        if self.channels_last:
+            batch = batch.contiguous(memory_format=torch.channels_last)
+        return batch
+
+    def _postfix(self, loss: torch.Tensor) -> dict:
+        postfix = {
+            "loss": f"{loss.item():.3f}",
+            "amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
+        }
+        if self.scheduler is not None:
+            postfix["lr"] = f"{self.scheduler.get_last_lr()[0]:.2e}"
+        if self.device.type == "cuda":
+            # YOLO-style: reserved VRAM per visible GPU (GiB).
+            postfix["vram"] = " ".join(
+                f"{torch.cuda.memory_reserved(i) / (1024 ** 3):.1f}G"
+                for i in range(torch.cuda.device_count())
+            )
+        return postfix
 
     def train_epoch(self, train_histoy_metrics: Metrichistory, epoch: int, epochs: int):
         self.model.train()
-        self.model.to(self.device)
         train_histoy_metrics.create_point()
-        pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}")
-        for batch, y_labels in pbar:
+        pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
+        for step, (batch, y_labels) in enumerate(pbar):
             self.optimizer.zero_grad(set_to_none=True)
-            batch = batch.to(self.device, non_blocking=True)
+            batch = self._to_device(batch)
             y_labels = y_labels.to(self.device, non_blocking=True)
             batch, y_labels = self.batch_transforms(batch, y_labels)
-            with autocast("cuda", enabled=self.amp):
+            with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch)
                 loss = self.criterion(pred, y_labels)
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            train_histoy_metrics.accumulate_last_point(pred.float(), y_labels, loss.detach().float())
-            postfix = {"loss": f"{loss.item():.3f}", "amp": int(self.amp)}
-            if self.device.type == "cuda":
-                # YOLO-style: reserved VRAM per visible GPU (GiB).
-                mem = " ".join(
-                    f"{torch.cuda.memory_reserved(i) / (1024 ** 3):.1f}G"
-                    for i in range(torch.cuda.device_count())
-                )
-                postfix["vram"] = mem
-            pbar.set_postfix(postfix)
+            if self.scheduler is not None:
+                self.scheduler.step()
+            train_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())
+            if step % self.log_every == 0:
+                pbar.set_postfix(self._postfix(loss))
         train_histoy_metrics.print_last()
 
     # Validate for classification
     def validate(self, val_histoy_metrics: Metrichistory, epoch: int, epochs: int):
         self.model.eval()
-        self.model.to(self.device)
-        pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}")
+        pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}", mininterval=1.0)
         val_histoy_metrics.create_point()
         with torch.inference_mode():
-            for batch, y_labels in pbar:
-                batch = batch.to(self.device, non_blocking=True)
-                y_labels = torch.nn.functional.one_hot(y_labels, num_classes=self.num_classes).float()
+            for step, (batch, y_labels) in enumerate(pbar):
+                batch = self._to_device(batch)
                 y_labels = y_labels.to(self.device, non_blocking=True)
-                with autocast("cuda", enabled=self.amp):
+                y_labels = torch.nn.functional.one_hot(y_labels, num_classes=self.num_classes).float()
+                with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                     pred = self.model(batch)
                     loss = self.criterion(pred, y_labels)
-                val_histoy_metrics.accumulate_last_point(pred.float(), y_labels, loss.detach().float())
-                pbar.set_postfix(loss=loss.item())
+                val_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())
+                if step % self.log_every == 0:
+                    pbar.set_postfix(loss=loss.item())
             val_histoy_metrics.print_last()
 
     def _load_checkpoint(self, name: str = "last"):
@@ -110,6 +154,13 @@ class Trainer():
             epoch = None
         target = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
         target.load_state_dict(state)
+        if isinstance(ckpt, dict):
+            # Without the optimizer state, every restart throws away AdamW's moments and
+            # the loss visibly jumps; older checkpoints simply do not carry it.
+            if "optimizer" in ckpt:
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+            if "scaler" in ckpt and self.scaler.is_enabled():
+                self.scaler.load_state_dict(ckpt["scaler"])
         return epoch
 
     def _retake(self, train_histoy_metrics: Metrichistory, val_histoy_metrics: Metrichistory) -> int:
@@ -135,6 +186,10 @@ class Trainer():
         val_histoy_metrics.restore_best()
         train_histoy_metrics.save()
         val_histoy_metrics.save()
+        if self.scheduler is not None:
+            # Derived from the epoch rather than stored, so the schedule stays correct
+            # even for checkpoints written before it existed.
+            self.scheduler.set_step(start_epoch * len(self.train_loader))
         print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
 
@@ -159,7 +214,12 @@ class Trainer():
     def save_model(self, name: str, epoch=None):
         self.weights_path.mkdir(parents=True, exist_ok=True)
         state = self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
-        payload = {"model": state, "epoch": epoch} if epoch is not None else state
+        if epoch is None:
+            torch.save(state, self.weights_path / f"{name}.pth")
+            return
+        payload = {"model": state, "epoch": epoch, "optimizer": self.optimizer.state_dict()}
+        if self.scaler.is_enabled():
+            payload["scaler"] = self.scaler.state_dict()
         torch.save(payload, self.weights_path / f"{name}.pth")
 
 def main():
@@ -172,10 +232,16 @@ def main():
     train_loader = data.DataLoader(train_dataset, batch_size=128, shuffle=True)
     val_loader = data.DataLoader(val_dataset, batch_size=128, shuffle=False)
     batch_transforms = build_train_batch_transforms(num_classes=num_classes)
+    scheduler = CosineWithWarmup(
+        optimizer,
+        warmup_steps=2 * len(train_loader),
+        total_steps=10 * len(train_loader),
+    )
     trainer = Trainer(
         experiment_name="test",
         model=model,
         optimizer=optimizer,
+        scheduler=scheduler,
         criterion=criterion,
         train_loader=train_loader,
         val_loader=val_loader,
