@@ -67,10 +67,21 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
+# Hugging Face: compute nodes are offline — use a cache filled on a login node.
+HF_HOME="${HF_HOME:-${CINECA_SCRATCH:-$HOME}/hf}"
+HF_HOME="${HF_HOME/#\~/$HOME}"
+export HF_HOME
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
 echo "Python: $(which python)"
 echo "Venv site: ${VENV_SITE}"
+echo "HF cache: ${HF_DATASETS_CACHE}"
 echo "Account: ${SLURM_ACCOUNT:-unset}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Start: $(date)"

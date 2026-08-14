@@ -1,26 +1,35 @@
 import io
+import os
+
 from torch.utils.data import Dataset
-from datasets import IterableDataset, IterableDatasetDict, load_dataset
+from datasets import IterableDataset, load_dataset
 from PIL import Image
 from torchvision.transforms.functional import to_pil_image
 
 from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_transforms
 
+
 class ImageNetDataset(Dataset):
     def __init__(self, split, transforms=None, streaming=False):
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        cache_dir = os.environ.get("HF_DATASETS_CACHE")
         self.ds = load_dataset(
             "ILSVRC/imagenet-1k",
             split=split,
-            streaming=streaming
+            streaming=streaming,
+            token=token,
+            cache_dir=cache_dir,
         )
         self.transforms = transforms
         self.streaming = streaming
         if streaming == False:
             self._len = self.ds.__len__()
+
     def __len__(self):
         if not self._len:
             raise TypeError("streaming dataloader cannot have length")
         return self._len
+
     def __getitem__(self, index):
         row = self.ds[index]
         if isinstance(self.ds, IterableDataset):
@@ -30,11 +39,11 @@ class ImageNetDataset(Dataset):
             img = img.convert("RGB")
         else:
             img = Image.open(io.BytesIO(img["bytes"])).convert("RGB")
-        label = int(row['label']) # img label index
+        label = int(row["label"])  # img label index
         if self.transforms:
             img = self.transforms(img)
         return img, label
-    pass
+
 
 if __name__ == "__main__":
     transforms = build_train_transforms(224)
