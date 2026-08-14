@@ -67,15 +67,24 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
-# Hugging Face: compute nodes are offline — use a cache filled on a login node.
+# Hugging Face: compute nodes are offline. Point at the existing cache
+# (parent of ILSVRC___imagenet-1k), e.g. $WORK/huggingface on Leonardo.
+HF_HOME="${HF_HOME:-${WORK:+$WORK/huggingface}}"
 HF_HOME="${HF_HOME:-${CINECA_SCRATCH:-$HOME}/hf}"
 HF_HOME="${HF_HOME/#\~/$HOME}"
 export HF_HOME
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+# Dataset arrows live next to hub/ under $WORK/huggingface, not in a datasets/ subdir.
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME}"
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+
+if [[ ! -d "${HF_DATASETS_CACHE}/ILSVRC___imagenet-1k" ]]; then
+  echo "ImageNet cache not found at ${HF_DATASETS_CACHE}/ILSVRC___imagenet-1k" >&2
+  echo "Set HF_HOME / HF_DATASETS_CACHE in .env to the folder that contains ILSVRC___imagenet-1k." >&2
+  exit 1
+fi
 
 echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
