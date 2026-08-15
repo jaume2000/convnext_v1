@@ -83,10 +83,37 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-if [[ ! -d "${HF_DATASETS_CACHE}/ILSVRC___imagenet-1k" ]]; then
-  echo "ImageNet cache not found at ${HF_DATASETS_CACHE}/ILSVRC___imagenet-1k" >&2
-  echo "Set HF_HOME / HF_DATASETS_CACHE in .env to the folder that contains ILSVRC___imagenet-1k." >&2
+DATASET_DIR="ILSVRC___imagenet-1k"
+if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
+  echo "ImageNet cache not found at ${HF_DATASETS_CACHE}/${DATASET_DIR}" >&2
+  echo "Set HF_HOME / HF_DATASETS_CACHE in .env to the folder that contains ${DATASET_DIR}." >&2
   exit 1
+fi
+
+# Shuffled training turns into random ~110 KiB reads, which on GPFS cap the dataloader
+# at ~900 img/s while the four GPUs can consume ~4600. Copy the dataset into the node's
+# tmpfs first: that copy is sequential, which is exactly what GPFS is good at, and every
+# read afterwards comes from RAM. Set STAGE_DATA=0 to train straight from GPFS.
+if [[ "${STAGE_DATA:-1}" == "1" ]]; then
+  STAGE_ROOT="/dev/shm/hfstage_${SLURM_JOB_ID}"
+  needed_kb="$(du -sk "${HF_DATASETS_CACHE}/${DATASET_DIR}" | cut -f1)"
+  avail_kb="$(df --output=avail -k /dev/shm | tail -1)"
+  margin_kb=$((30 * 1024 * 1024))
+  if (( needed_kb + margin_kb > avail_kb )); then
+    echo "Skipping staging: need $((needed_kb / 1024 / 1024))G + 30G margin," \
+         "/dev/shm has $((avail_kb / 1024 / 1024))G" >&2
+  else
+    # tmpfs is unreclaimable, so release it even if SLURM kills the job at the time limit.
+    trap 'rm -rf "${STAGE_ROOT}"' EXIT TERM INT
+    echo "Staging $((needed_kb / 1024 / 1024))G into ${STAGE_ROOT}"
+    stage_start="${SECONDS}"
+    pushd "${HF_DATASETS_CACHE}" > /dev/null
+    find "${DATASET_DIR}" -type d -exec mkdir -p "${STAGE_ROOT}/{}" \;
+    find "${DATASET_DIR}" -type f -print0 | xargs -0 -P 8 -I{} cp -p {} "${STAGE_ROOT}/{}"
+    popd > /dev/null
+    echo "Staged in $((SECONDS - stage_start))s"
+    export HF_DATASETS_CACHE="${STAGE_ROOT}"
+  fi
 fi
 
 echo "Host: $(hostname)"

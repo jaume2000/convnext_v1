@@ -89,4 +89,6 @@ trainer = Trainer(
     amp=True,
 )
 
-trainer.fit(EPOCHS, retake=False)
+# The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes
+# from outputs/<experiment>/weights/last.pth instead of having to edit this file.
+trainer.fit(EPOCHS, retake=os.environ.get("RETAKE", "0") == "1")
