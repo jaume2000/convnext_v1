@@ -6,16 +6,17 @@ from data.transforms.transforms import build_train_batch_transforms, build_train
 from models.backbones.convnext import ConvNextV1
 from engine.trainer import Trainer
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from optim.cosineSchedule import CosineWithWarmup
 from timm.loss import SoftTargetCrossEntropy
 import torch
 import torch.nn as nn
 
 EPOCHS = 600
-PATIENCE = 10
-BATCH_SIZE = 1024
+WARMUP_EPOCHS = 20
+BATCH_SIZE = 4096
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 4e-3 * BATCH_SIZE / 4096
+MIN_LR = 1e-6
 
 
 def available_cpus() -> int:
@@ -66,16 +67,14 @@ val_loader = DataLoader(
 )
 
 optimizer = AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=0.05)
-# Stepped once per epoch on the validation loss by the Trainer. The verbose flag is gone
-# from recent PyTorch, so the Trainer prints the reductions instead.
-scheduler = ReduceLROnPlateau(
+steps_per_epoch = len(train_loader)
+scheduler = CosineWithWarmup(
     optimizer,
-    mode="min",
-    factor=0.5,
-    patience=PATIENCE,
-    min_lr=1e-6,
+    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
+    total_steps=EPOCHS * steps_per_epoch,
+    min_lr=MIN_LR,
 )
-print(f"LR: {LR:.2e}, halved after {PATIENCE} epochs without val loss improvement")
+print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
 trainer = Trainer(
     experiment_name="convnextv1_imagenet",

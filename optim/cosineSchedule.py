@@ -1,6 +1,5 @@
-import math
-
 import torch
+from timm.scheduler import CosineLRScheduler
 
 
 class CosineWithWarmup:
@@ -9,6 +8,9 @@ class CosineWithWarmup:
     Stepping per iteration instead of per epoch matters for the ConvNeXt recipe: warmup
     covers a handful of epochs out of hundreds, so an epoch-granular schedule would run
     the whole warmup at only a few distinct learning rates.
+
+    Backed by timm's CosineLRScheduler, wrapped because timm drives its schedulers with
+    step_update(absolute_step) while the Trainer expects the torch-style step()/set_step().
     """
 
     def __init__(
@@ -22,25 +24,26 @@ class CosineWithWarmup:
         self.optimizer = optimizer
         self.warmup_steps = warmup_steps
         self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.warmup_start_lr = warmup_start_lr
-        self.base_lrs = [group["lr"] for group in optimizer.param_groups]
         self.step_count = 0
+        self.scheduler = CosineLRScheduler(
+            optimizer,
+            # warmup_prefix keeps the cosine starting at the peak LR once warmup ends,
+            # so t_initial counts the decay only. Without it timm folds warmup into the
+            # cosine and the peak is never actually reached.
+            t_initial=max(total_steps - warmup_steps, 1),
+            lr_min=min_lr,
+            warmup_t=warmup_steps,
+            warmup_lr_init=warmup_start_lr,
+            warmup_prefix=True,
+            t_in_epochs=False,
+            cycle_limit=1,
+        )
         self.set_step(0)
-
-    def lr_at(self, step: int, base_lr: float) -> float:
-        if step < self.warmup_steps:
-            progress = step / max(self.warmup_steps, 1)
-            return self.warmup_start_lr + (base_lr - self.warmup_start_lr) * progress
-        decay_steps = max(self.total_steps - self.warmup_steps, 1)
-        progress = min((step - self.warmup_steps) / decay_steps, 1.0)
-        return self.min_lr + (base_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
 
     def set_step(self, step: int):
         """Jump the schedule to an absolute step, used when resuming a run."""
         self.step_count = step
-        for group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-            group["lr"] = self.lr_at(step, base_lr)
+        self.scheduler.step_update(step)
 
     def step(self):
         self.set_step(self.step_count + 1)
