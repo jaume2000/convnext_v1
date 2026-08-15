@@ -6,6 +6,7 @@ class Metric:
     def __init__(self):
         self.total_loss = 0
         self.total_samples = 0
+        self.lr: float | None = None
         self._device_sums: dict[str, torch.Tensor] = {}
 
     def accumulate(self, pred: torch.Tensor, target: torch.Tensor) -> None:
@@ -51,4 +52,6 @@ class Metric:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # Points pickled before the LR was tracked simply do not carry it.
+        self.lr = state.get("lr")
         self._device_sums = {}

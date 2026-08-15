@@ -19,8 +19,9 @@ class Metrichistory:
     def compute_last(self):
         return self.metricHistory[-1].compute_metric()
 
-    def create_point(self):
+    def create_point(self, lr: float | None = None):
         metric = self.metric_cls()
+        metric.lr = lr
         self.append(metric)
         self.save()
 
@@ -37,9 +38,10 @@ class Metrichistory:
     def toCSV(self):
         with open(self.path / "results" / f"{self.name}_history.csv", "w") as f:
             writer = csv.writer(f)
-            writer.writerow(["Epoch", self.metric_cls.__name__, "Loss"])
+            writer.writerow(["Epoch", self.metric_cls.__name__, "Loss", "LR"])
             for i, metric in enumerate(self.metricHistory):
-                writer.writerow([i, metric.compute_metric(), metric.compute_loss()])
+                lr = "" if metric.lr is None else metric.lr
+                writer.writerow([i, metric.compute_metric(), metric.compute_loss(), lr])
 
     def history_path(self) -> Path:
         return self.path / "history" / f"{self.name}_history.pkl"

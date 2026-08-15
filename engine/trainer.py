@@ -89,15 +89,18 @@ class Trainer():
             batch = batch.contiguous(memory_format=torch.channels_last)
         return batch
 
+    def _current_lr(self) -> float:
+        # Read from the optimizer rather than get_last_lr(): ReduceLROnPlateau only
+        # grew that method once it became an LRScheduler subclass.
+        return self.optimizer.param_groups[0]["lr"]
+
     def _postfix(self, loss: torch.Tensor) -> dict:
         postfix = {
             "loss": f"{loss.item():.3f}",
             "amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
         }
         if self.scheduler is not None:
-            # Read from the optimizer rather than get_last_lr(): ReduceLROnPlateau only
-            # grew that method once it became an LRScheduler subclass.
-            postfix["lr"] = f"{self.optimizer.param_groups[0]['lr']:.2e}"
+            postfix["lr"] = f"{self._current_lr():.2e}"
         if self.device.type == "cuda":
             # YOLO-style: reserved VRAM per visible GPU (GiB).
             postfix["vram"] = " ".join(
@@ -106,9 +109,9 @@ class Trainer():
             )
         return postfix
 
-    def train_epoch(self, train_histoy_metrics: Metrichistory, epoch: int, epochs: int):
+    def train_epoch(self, train_histoy_metrics: Metrichistory, epoch: int, epochs: int, lr: float | None = None):
         self.model.train()
-        train_histoy_metrics.create_point()
+        train_histoy_metrics.create_point(self._current_lr() if lr is None else lr)
         pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
         for step, (batch, y_labels) in enumerate(pbar):
             self.optimizer.zero_grad(set_to_none=True)
@@ -129,10 +132,10 @@ class Trainer():
         train_histoy_metrics.print_last()
 
     # Validate for classification
-    def validate(self, val_histoy_metrics: Metrichistory, epoch: int, epochs: int):
+    def validate(self, val_histoy_metrics: Metrichistory, epoch: int, epochs: int, lr: float | None = None):
         self.model.eval()
         pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}", mininterval=1.0)
-        val_histoy_metrics.create_point()
+        val_histoy_metrics.create_point(self._current_lr() if lr is None else lr)
         with torch.inference_mode():
             for step, (batch, y_labels) in enumerate(pbar):
                 batch = self._to_device(batch)
@@ -221,8 +224,11 @@ class Trainer():
         val_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "val")
         start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if retake else 0
         for epoch in range(start_epoch, epochs):
-            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
-            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)
+            # Captured once so both histories log the LR the epoch started at; the cosine
+            # schedule has already moved on by the time validate() runs.
+            epoch_lr = self._current_lr()
+            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs, lr=epoch_lr)
+            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs, lr=epoch_lr)
             self._step_scheduler_on_epoch(val_histoy_metrics)
             if val_histoy_metrics.last_is_best():
                 self.save_model(name="best", epoch=epoch)
