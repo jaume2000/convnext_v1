@@ -100,7 +100,8 @@ echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
 # Override to profile instead of train:
-#   TRAIN_SCRIPT=scripts/bench.py sbatch --time=00:30:00 --account="$SLURM_ACCOUNT" jobs/train_convnext.sh
-srun python "${TRAIN_SCRIPT:-scripts/train.py}"
+#   TRAIN_SCRIPT=scripts/bench.py TRAIN_ARGS="--skip-gpu --skip-io" \
+#     sbatch --time=00:30:00 --account="$SLURM_ACCOUNT" jobs/train_convnext.sh
+srun python "${TRAIN_SCRIPT:-scripts/train.py}" ${TRAIN_ARGS:-}
 
 echo "End: $(date)"

@@ -65,6 +65,46 @@ class DecodeOnly(Dataset):
         return img.size[0]
 
 
+class InMemoryJpegs(Dataset):
+    """Full train pipeline over JPEGs already in RAM: the CPU ceiling with no I/O.
+
+    Workers inherit the blobs through fork, so nothing touches the filesystem and the
+    number measures what the cores could deliver if the dataset were staged in memory.
+    """
+
+    def __init__(self, blobs: list[bytes], transforms, length: int):
+        self.blobs = blobs
+        self.transforms = transforms
+        self.length = length
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        img = Image.open(io.BytesIO(self.blobs[index % len(self.blobs)])).convert("RGB")
+        return self.transforms(img), 0
+
+
+def load_blobs(hf_ds, count: int, short_side: int | None = None) -> list[bytes]:
+    """Sample JPEGs spread across the split, optionally re-encoded to a shorter side."""
+    ds = undecoded(hf_ds)
+    step = max(len(ds) // count, 1)
+    blobs = []
+    for index in range(0, count * step, step):
+        payload = ds[index]["image"]["bytes"]
+        if short_side:
+            img = Image.open(io.BytesIO(payload)).convert("RGB")
+            width, height = img.size
+            scale = short_side / min(width, height)
+            if scale < 1:
+                img = img.resize((round(width * scale), round(height * scale)), Image.BICUBIC)
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=90)
+            payload = buffer.getvalue()
+        blobs.append(payload)
+    return blobs
+
+
 def bench_loader(name: str, dataset: Dataset, batch_size: int, workers: int, results: dict):
     loader = DataLoader(
         dataset,
@@ -159,8 +199,11 @@ def main():
                         help="Small batches keep the data stages' memory bounded; throughput is batch-size independent.")
     parser.add_argument("--gpu-batch", type=int, default=256, help="Per-GPU batch for the compute stages.")
     parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--blobs", type=int, default=512, help="Distinct images held in RAM for the CPU stages.")
+    parser.add_argument("--short-side", type=int, default=256, help="Target short side for the re-encoded stage.")
     parser.add_argument("--compile", action="store_true", help="Also measure torch.compile (slow to warm up).")
     parser.add_argument("--skip-data", action="store_true")
+    parser.add_argument("--skip-io", action="store_true", help="Keep the RAM-only stages, drop the ones hitting GPFS.")
     parser.add_argument("--skip-gpu", action="store_true")
     args = parser.parse_args()
 
@@ -177,10 +220,23 @@ def main():
         from data.imagenet import ImageNetDataset
 
         base = ImageNetDataset(split="train")
-        bench_loader("data: read rows only", RawRows(base.ds), args.data_batch, args.workers, results)
-        bench_loader("data: read + jpeg decode", DecodeOnly(base.ds), args.data_batch, args.workers, results)
-        full = ImageNetDataset(split="train", transforms=build_train_transforms())
-        bench_loader("data: full train pipeline", full, args.data_batch, args.workers, results)
+        if not args.skip_io:
+            bench_loader("data: read rows only", RawRows(base.ds), args.data_batch, args.workers, results)
+            bench_loader("data: read + jpeg decode", DecodeOnly(base.ds), args.data_batch, args.workers, results)
+            full = ImageNetDataset(split="train", transforms=build_train_transforms())
+            bench_loader("data: full train pipeline", full, args.data_batch, args.workers, results)
+
+        transforms = build_train_transforms()
+        cached = args.data_batch * (3 * args.workers + 2)
+        originals = load_blobs(base.ds, args.blobs)
+        print(f"sampled {len(originals)} jpegs, mean {sum(map(len, originals)) / len(originals) / 1024:.0f} KiB")
+        bench_loader("cpu: pipeline, originals in RAM",
+                     InMemoryJpegs(originals, transforms, cached), args.data_batch, args.workers, results)
+        resized = load_blobs(base.ds, args.blobs, short_side=args.short_side)
+        print(f"re-encoded to {args.short_side}px short side, mean "
+              f"{sum(map(len, resized)) / len(resized) / 1024:.0f} KiB")
+        bench_loader(f"cpu: pipeline, {args.short_side}px in RAM",
+                     InMemoryJpegs(resized, transforms, cached), args.data_batch, args.workers, results)
 
     if not args.skip_gpu and gpus:
         bf16 = torch.cuda.is_bf16_supported()
