@@ -6,6 +6,10 @@ import torch.utils.data as data
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
+from metrics.metricGradNorm import MetricGradNorm
+from metrics.metricLoss import MetricLoss
+from metrics.metricLR import MetricLR
+
 # torch.amp.GradScaler exists on newer PyTorch; cineca-ai 4.1 only has torch.cuda.amp.
 try:
     from torch.amp import GradScaler, autocast
@@ -20,7 +24,7 @@ except ImportError:
 
 from data.testingDataset import TestingDataset
 from data.transforms.transforms import build_train_batch_transforms
-from metrics.metricHistory import Metrichistory
+from metrics.metricHistory import DictHistoryMetrics
 from metrics.top1acc import Top1AccMetric
 from optim.cosineSchedule import CosineWithWarmup
 
@@ -64,6 +68,7 @@ class Trainer():
         # Depthwise 7x7 convs and channel-wise LayerNorm both prefer NHWC on tensor cores.
         self.channels_last = channels_last and device.type == "cuda"
         self.log_every = log_every
+        self.gradient_clipping = gradient_clipping
         self.experiment_path = Path(f"outputs/{self.experiment_name}")
         self.weights_path = self.experiment_path / "weights"
         if device.type == "cuda":
@@ -112,9 +117,9 @@ class Trainer():
             )
         return postfix
 
-    def train_epoch(self, train_histoy_metrics: Metrichistory, epoch: int, epochs: int, lr: float | None = None):
+    def train_epoch(self, train_histoy_metrics: DictHistoryMetrics, epoch: int, epochs: int):
         self.model.train()
-        train_histoy_metrics.create_point(self._current_lr() if lr is None else lr)
+        train_histoy_metrics.create_point()
         pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
         for step, (batch, y_labels) in enumerate(pbar):
             self.optimizer.zero_grad(set_to_none=True)
@@ -125,22 +130,29 @@ class Trainer():
                 pred = self.model(batch)
                 loss = self.criterion(pred, y_labels)
             self.scaler.scale(loss).backward()
+            if self.gradient_clipping is not None:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), self.gradient_clipping)
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            if self.gradient_clipping:
-                torch.nn.utils.clip_grad_value_(self.model.parameters(), self.gradient_clipping)
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
-            train_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())
+            train_histoy_metrics.accumulate(
+                model=self.model,
+                loss=loss.detach(),
+                pred=pred.detach(),
+                y_labels=y_labels,
+                lr=self._current_lr(),
+            )
             if step % self.log_every == 0:
-                pbar.set_postfix(self._postfix(loss))
+                pbar.set_postfix(self._postfix(loss, model=self.model))
         train_histoy_metrics.print_last()
 
     # Validate for classification
-    def validate(self, val_histoy_metrics: Metrichistory, epoch: int, epochs: int, lr: float | None = None):
+    def validate(self, val_histoy_metrics: DictHistoryMetrics, epoch: int, epochs: int):
         self.model.eval()
         pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}", mininterval=1.0)
-        val_histoy_metrics.create_point(self._current_lr() if lr is None else lr)
+        val_histoy_metrics.create_point()
         with torch.inference_mode():
             for step, (batch, y_labels) in enumerate(pbar):
                 batch = self._to_device(batch)
@@ -149,10 +161,10 @@ class Trainer():
                 with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                     pred = self.model(batch)
                     loss = self.criterion(pred, y_labels)
-                val_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())
+                val_histoy_metrics.accumulate(pred=pred.detach(), y_labels=y_labels, loss=loss.detach())
                 if step % self.log_every == 0:
                     pbar.set_postfix(loss=loss.item())
-            val_histoy_metrics.print_last()
+        val_histoy_metrics.print_last()
 
     def _load_checkpoint(self, name: str = "last"):
         path = self.weights_path / f"{name}.pth"
@@ -184,7 +196,7 @@ class Trainer():
                     print("Warning: checkpoint has no scheduler state, plateau counters restart")
         return epoch
 
-    def _retake(self, train_histoy_metrics: Metrichistory, val_histoy_metrics: Metrichistory) -> int:
+    def _retake(self, train_histoy_metrics: DictHistoryMetrics, val_histoy_metrics: DictHistoryMetrics) -> int:
         ckpt_name = "last" if (self.weights_path / "last.pth").is_file() else "best"
         ckpt_epoch = self._load_checkpoint(ckpt_name)
         train_loaded = train_histoy_metrics.load()
@@ -200,11 +212,11 @@ class Trainer():
         if ckpt_epoch is not None:
             start_epoch = ckpt_epoch + 1
         else:
-            start_epoch = min(len(train_histoy_metrics.metricHistory), len(val_histoy_metrics.metricHistory))
+            start_epoch = min(train_histoy_metrics.num_epochs(), val_histoy_metrics.num_epochs())
 
         train_histoy_metrics.truncate(start_epoch)
         val_histoy_metrics.truncate(start_epoch)
-        val_histoy_metrics.restore_best()
+        val_histoy_metrics.restore_best("top1acc")
         train_histoy_metrics.save()
         val_histoy_metrics.save()
         if self.scheduler is not None and not self.scheduler_per_epoch:
@@ -214,36 +226,37 @@ class Trainer():
         print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
 
-    def _step_scheduler_on_epoch(self, val_histoy_metrics: Metrichistory):
+    def _step_scheduler_on_epoch(self, val_histoy_metrics: DictHistoryMetrics):
         if self.scheduler is None or not self.scheduler_per_epoch:
             return
         lr_before = self.optimizer.param_groups[0]["lr"]
-        self.scheduler.step(val_histoy_metrics.metricHistory[-1].compute_loss())
+        self.scheduler.step(val_histoy_metrics.get("loss").compute_last())
         lr_after = self.optimizer.param_groups[0]["lr"]
         if lr_after != lr_before:
             # Replaces ReduceLROnPlateau's verbose flag, which newer PyTorch removed.
             print(f"LR reduced: {lr_before:.2e} -> {lr_after:.2e}")
 
     def fit(self, epochs, retake: bool = False):
-        train_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "train")
-        val_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "val")
+        train_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="train")
+        train_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+        train_histoy_metrics.addHistoryMetric("gradnorm", MetricGradNorm)
+        train_histoy_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
+        train_histoy_metrics.addHistoryMetric("lr", MetricLR)
+        val_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="val")
+        val_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+        val_histoy_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
         start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if retake else 0
         for epoch in range(start_epoch, epochs):
-            # Captured once so both histories log the LR the epoch started at; the cosine
-            # schedule has already moved on by the time validate() runs.
-            epoch_lr = self._current_lr()
-            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs, lr=epoch_lr)
-            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs, lr=epoch_lr)
+            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
+            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)
             self._step_scheduler_on_epoch(val_histoy_metrics)
-            if val_histoy_metrics.last_is_best():
+            if val_histoy_metrics.last_is_best("top1acc"):
                 self.save_model(name="best", epoch=epoch)
             self.save_model(name="last", epoch=epoch)
-        train_histoy_metrics.save()
-        val_histoy_metrics.save()
+            train_histoy_metrics.save()
+            val_histoy_metrics.save()
         train_histoy_metrics.plot_history()
         val_histoy_metrics.plot_history()
-        train_histoy_metrics.plot_history_loss()
-        val_histoy_metrics.plot_history_loss()
         return train_histoy_metrics, val_histoy_metrics
 
     def save_model(self, name: str, epoch=None):
