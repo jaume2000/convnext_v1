@@ -5,8 +5,8 @@ from data.imagenet import ImageNetDataset
 from data.transforms.transforms import build_train_batch_transforms, build_train_transforms, build_val_transforms
 from models.backbones.convnext import ConvNextV1
 from engine.trainer import Trainer
-from optim.cosineSchedule import CosineWithWarmup
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from timm.loss import SoftTargetCrossEntropy
 import torch
 import torch.nn as nn
@@ -67,10 +67,12 @@ val_loader = DataLoader(
 
 optimizer = AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=0.05)
 steps_per_epoch = len(train_loader)
-scheduler = CosineWithWarmup(
+scheduler = ReduceLROnPlateau(
     optimizer,
-    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
-    total_steps=EPOCHS * steps_per_epoch,
+    mode="min",
+    factor=0.5,
+    patience=10,
+    verbose=True,
     min_lr=1e-6,
 )
 print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
