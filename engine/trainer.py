@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 # torch.amp.GradScaler exists on newer PyTorch; cineca-ai 4.1 only has torch.cuda.amp.
@@ -44,7 +45,10 @@ class Trainer():
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
-        self.scheduler = scheduler          # Stepped per iteration, may be None
+        self.scheduler = scheduler          # May be None
+        # Plateau schedulers need the validation loss and react to epoch-level noise, so
+        # they are stepped once after validate(); everything else steps per iteration.
+        self.scheduler_per_epoch = isinstance(scheduler, ReduceLROnPlateau)
         self.criterion = criterion          # Loss function
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -91,7 +95,9 @@ class Trainer():
             "amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
         }
         if self.scheduler is not None:
-            postfix["lr"] = f"{self.scheduler.get_last_lr()[0]:.2e}"
+            # Read from the optimizer rather than get_last_lr(): ReduceLROnPlateau only
+            # grew that method once it became an LRScheduler subclass.
+            postfix["lr"] = f"{self.optimizer.param_groups[0]['lr']:.2e}"
         if self.device.type == "cuda":
             # YOLO-style: reserved VRAM per visible GPU (GiB).
             postfix["vram"] = " ".join(
@@ -115,7 +121,7 @@ class Trainer():
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            if self.scheduler is not None:
+            if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             train_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())
             if step % self.log_every == 0:
@@ -161,6 +167,13 @@ class Trainer():
                 self.optimizer.load_state_dict(ckpt["optimizer"])
             if "scaler" in ckpt and self.scaler.is_enabled():
                 self.scaler.load_state_dict(ckpt["scaler"])
+            # A plateau schedule cannot be rebuilt from the epoch number: its patience and
+            # best-so-far counters are the whole state, so they have to be restored.
+            if self.scheduler_per_epoch:
+                if "scheduler" in ckpt:
+                    self.scheduler.load_state_dict(ckpt["scheduler"])
+                else:
+                    print("Warning: checkpoint has no scheduler state, plateau counters restart")
         return epoch
 
     def _retake(self, train_histoy_metrics: Metrichistory, val_histoy_metrics: Metrichistory) -> int:
@@ -186,12 +199,22 @@ class Trainer():
         val_histoy_metrics.restore_best()
         train_histoy_metrics.save()
         val_histoy_metrics.save()
-        if self.scheduler is not None:
+        if self.scheduler is not None and not self.scheduler_per_epoch:
             # Derived from the epoch rather than stored, so the schedule stays correct
             # even for checkpoints written before it existed.
             self.scheduler.set_step(start_epoch * len(self.train_loader))
         print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
+
+    def _step_scheduler_on_epoch(self, val_histoy_metrics: Metrichistory):
+        if self.scheduler is None or not self.scheduler_per_epoch:
+            return
+        lr_before = self.optimizer.param_groups[0]["lr"]
+        self.scheduler.step(val_histoy_metrics.metricHistory[-1].compute_loss())
+        lr_after = self.optimizer.param_groups[0]["lr"]
+        if lr_after != lr_before:
+            # Replaces ReduceLROnPlateau's verbose flag, which newer PyTorch removed.
+            print(f"LR reduced: {lr_before:.2e} -> {lr_after:.2e}")
 
     def fit(self, epochs, retake: bool = False):
         train_histoy_metrics = Metrichistory(self.experiment_path, Top1AccMetric, "train")
@@ -200,6 +223,7 @@ class Trainer():
         for epoch in range(start_epoch, epochs):
             self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
             self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)
+            self._step_scheduler_on_epoch(val_histoy_metrics)
             if val_histoy_metrics.last_is_best():
                 self.save_model(name="best", epoch=epoch)
             self.save_model(name="last", epoch=epoch)
@@ -220,6 +244,8 @@ class Trainer():
         payload = {"model": state, "epoch": epoch, "optimizer": self.optimizer.state_dict()}
         if self.scaler.is_enabled():
             payload["scaler"] = self.scaler.state_dict()
+        if self.scheduler_per_epoch:
+            payload["scheduler"] = self.scheduler.state_dict()
         torch.save(payload, self.weights_path / f"{name}.pth")
 
 def main():
