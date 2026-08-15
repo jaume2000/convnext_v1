@@ -41,7 +41,8 @@ class Trainer():
     amp_dtype: str = "auto",
     channels_last: bool = True,
     log_every: int = 20,
-    scheduler=None):
+    scheduler=None,
+    gradient_clipping: float | None = None):
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
@@ -94,10 +95,12 @@ class Trainer():
         # grew that method once it became an LRScheduler subclass.
         return self.optimizer.param_groups[0]["lr"]
 
-    def _postfix(self, loss: torch.Tensor) -> dict:
+    def _postfix(self, loss: torch.Tensor, model: nn.Module) -> dict:
+        grad_norm = torch.mean(torch.stack([p.grad.norm() for p in model.parameters() if p.grad is not None]))
         postfix = {
             "loss": f"{loss.item():.3f}",
-            "amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
+            #"amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
+            "grad_norm": f"{grad_norm:.3f}"
         }
         if self.scheduler is not None:
             postfix["lr"] = f"{self._current_lr():.2e}"
@@ -124,6 +127,8 @@ class Trainer():
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            if self.gradient_clipping:
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), self.gradient_clipping)
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             train_histoy_metrics.accumulate_last_point(pred.detach(), y_labels, loss.detach())

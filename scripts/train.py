@@ -11,11 +11,11 @@ from timm.loss import SoftTargetCrossEntropy
 import torch
 import torch.nn as nn
 
-EPOCHS = 600
+EPOCHS = 300
 WARMUP_EPOCHS = 20
 BATCH_SIZE = 1024
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 4e-3 * BATCH_SIZE / 4096
+LR = 4e-3
 MIN_LR = 1e-6
 
 
@@ -45,7 +45,7 @@ val_dataset = ImageNetDataset(split="validation", transforms=build_val_transform
 # JPEG decode + RandAugment is the pipeline's bottleneck, so use every allocated core.
 # With automatic batching each worker builds a whole batch, so throughput is
 # num_workers / (batch_size * seconds_per_image): too few workers starves the GPUs.
-num_workers = available_cpus()
+num_workers = available_cpus() * 2
 print(f"Dataloader workers: {num_workers}")
 
 train_loader = DataLoader(
@@ -88,6 +88,7 @@ trainer = Trainer(
     batch_transforms=build_train_batch_transforms(),
     num_classes=1000,
     amp=True,
+    gradient_clipping=100.0, # value clipping
 )
 
 # The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes
