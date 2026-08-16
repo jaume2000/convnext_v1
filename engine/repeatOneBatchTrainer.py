@@ -155,7 +155,7 @@ class Trainer():
         train_histoy_metrics.create_point()
         #pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
         pbar = tqdm(range(200), desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
-        first_batch, first_y_labels = self.train_loader.dataset[0]
+        first_batch, first_y_labels = next(iter(self.train_loader))
         for step in pbar:
             self.optimizer.zero_grad(set_to_none=True)
             batch = self._to_device(first_batch)
