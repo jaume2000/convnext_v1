@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 EPOCHS = 300
-WARMUP_EPOCHS = 10
+WARMUP_EPOCHS = 20
 BATCH_SIZE = 1024
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 5e-4
