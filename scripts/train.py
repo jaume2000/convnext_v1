@@ -42,7 +42,7 @@ else:
 
 # train loader and val loader of imagenet with huggingface datasets
 
-train_dataset = ImageNetDataset(split="train", transforms=build_val_transforms())
+train_dataset = ImageNetDataset(split="train", transforms=build_train_transforms())
 val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
 
 num_workers = available_cpus()
