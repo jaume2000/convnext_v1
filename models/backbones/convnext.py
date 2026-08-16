@@ -31,7 +31,7 @@ class ConvNextV1(nn.Module):
         )
         self.stage3 = nn.Sequential(
             *[ConvnextBlock(self.stage_dims[2], self.drop_paths[i + self.accum_depths[2]]) for i in range(9)],
-            LayerNorm2d(self.stage_dims[3]),
+            LayerNorm2d(self.stage_dims[2]),
             nn.Conv2d(self.stage_dims[2], self.stage_dims[3], kernel_size=2, stride=2, padding=0),
         )
         self.stage4 = nn.Sequential(*[ConvnextBlock(self.stage_dims[3], self.drop_paths[i + self.accum_depths[3]]) for i in range(3)])
