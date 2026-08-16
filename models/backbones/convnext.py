@@ -17,16 +17,16 @@ class ConvNextV1(nn.Module):
             LayerNorm2d(96 * 2),
         )
         self.stage2 = nn.Sequential(
-            *[ConvnextBlock(96 * 2, 0.4) for _ in range(3)],
+            *[ConvnextBlock(96 * 2, 0.1) for _ in range(3)],
             nn.Conv2d(96 * 2, 96 * 4, kernel_size=2, stride=2, padding=0),
             LayerNorm2d(96 * 4),
         )
         self.stage3 = nn.Sequential(
-            *[ConvnextBlock(96 * 4, 0.5) for _ in range(9)],
+            *[ConvnextBlock(96 * 4, 0.1) for _ in range(9)],
             nn.Conv2d(96 * 4, 96 * 8, kernel_size=2, stride=2, padding=0),
             LayerNorm2d(96 * 8),
         )
-        self.stage4 = nn.Sequential(*[ConvnextBlock(96 * 8, 0.5) for _ in range(3)])
+        self.stage4 = nn.Sequential(*[ConvnextBlock(96 * 8, 0.1) for _ in range(3)])
         self.globalPool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             LayerNorm2d(96 * 8),

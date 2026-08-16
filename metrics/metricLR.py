@@ -6,15 +6,15 @@ class MetricLR(Metric):
 
     def __init__(self):
         super().__init__()
-        self.minibatch_lrHistory: list[float] = []
+        self.total_lr = 0.0
 
     def accumulate(self, lr: float | None = None, **kwargs):
         if lr is None:
             return
-        self.minibatch_lrHistory.append(float(lr))
+        self.total_lr += float(lr)
         self.total_samples += 1
 
     def compute_metric(self) -> float:
-        if not self.minibatch_lrHistory:
+        if self.total_samples == 0:
             return 0.0
-        return sum(self.minibatch_lrHistory) / len(self.minibatch_lrHistory)
+        return self.total_lr / self.total_samples

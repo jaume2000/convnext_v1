@@ -7,16 +7,19 @@ from models.backbones.convnext import ConvNextV1
 from engine.trainer import Trainer
 from torch.optim import AdamW
 from optim.cosineSchedule import CosineWithWarmup
+from optim.paramGroups import build_param_groups
 from timm.loss import SoftTargetCrossEntropy
 import torch
 import torch.nn as nn
 
 EPOCHS = 300
-WARMUP_EPOCHS = 20
+WARMUP_EPOCHS = 10
 BATCH_SIZE = 1024
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 4e-3
+LR = 1e-3
 MIN_LR = 1e-6
+# Applied to conv/linear weights only, see build_param_groups.
+WEIGHT_DECAY = 0.1
 
 
 def available_cpus() -> int:
@@ -66,7 +69,12 @@ val_loader = DataLoader(
     persistent_workers=True,
 )
 
-optimizer = AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), weight_decay=0.05)
+param_groups = build_param_groups(model, weight_decay=WEIGHT_DECAY)
+print(
+    f"Weight decay {WEIGHT_DECAY} on {sum(p.numel() for p in param_groups[0]['params'])} params, "
+    f"none on {sum(p.numel() for p in param_groups[1]['params'])} (norms, biases, layer scale)"
+)
+optimizer = AdamW(param_groups, lr=LR, betas=(0.9, 0.999))
 steps_per_epoch = len(train_loader)
 scheduler = CosineWithWarmup(
     optimizer,
@@ -88,7 +96,7 @@ trainer = Trainer(
     batch_transforms=build_train_batch_transforms(),
     num_classes=1000,
     amp=True,
-    gradient_clipping=100.0, # value clipping
+    gradient_clipping=5.0, # norm clipping
 )
 
 # The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes

@@ -100,8 +100,41 @@ class Trainer():
         # grew that method once it became an LRScheduler subclass.
         return self.optimizer.param_groups[0]["lr"]
 
-    def _postfix(self, loss: torch.Tensor, model: nn.Module) -> dict:
-        grad_norm = torch.mean(torch.stack([p.grad.norm() for p in model.parameters() if p.grad is not None]))
+    def _resume_hint(self) -> str:
+        return (
+            f"{self.weights_path / 'last.pth'} still holds the last finite epoch, "
+            "so RETAKE=1 resumes from there."
+        )
+
+    def _checked_grad_norm(self, epoch: int, step: int) -> torch.Tensor:
+        """Total gradient norm, aborting the run if any gradient is inf/NaN.
+
+        A single inf/NaN gradient makes AdamW write NaN into the parameters *and* into
+        its moments, and the moments never recover, so every later epoch trains nothing:
+        a previous run spent 80 epochs that way. Nothing else catches it, since bf16
+        needs no loss scaling and a disabled GradScaler skips its own inf check.
+
+        Ordering matters: this runs before clip_grad_norm_, which would multiply every
+        gradient by a NaN total norm and erase the evidence of which tensor went first.
+        """
+        target = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        named_grads = [(name, p.grad) for name, p in target.named_parameters() if p.grad is not None]
+        # Norm of the per-tensor norms is the global norm, and it also says which tensor
+        # is the culprit without a second pass over the gradients.
+        norms = torch.stack([grad.float().norm() for _, grad in named_grads])
+        total_norm = norms.norm()
+        if torch.isfinite(total_norm).item():
+            return total_norm
+        culprits = [
+            name for (name, _), finite in zip(named_grads, torch.isfinite(norms).tolist()) if not finite
+        ]
+        raise RuntimeError(
+            f"Non-finite gradient at epoch {epoch + 1}, step {step}: "
+            f"{len(culprits)} of {len(named_grads)} tensors, first {', '.join(culprits[:5])}. "
+            + self._resume_hint()
+        )
+
+    def _postfix(self, loss: torch.Tensor, grad_norm: torch.Tensor) -> dict:
         postfix = {
             "loss": f"{loss.item():.3f}",
             #"amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
@@ -129,23 +162,33 @@ class Trainer():
             with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch)
                 loss = self.criterion(pred, y_labels)
+            # A non-finite loss means the weights are already poisoned, so there is
+            # nothing left to salvage by running the backward.
+            if not torch.isfinite(loss).item():
+                raise RuntimeError(
+                    f"Non-finite train loss ({loss.item()}) at epoch {epoch + 1}, step {step}. "
+                    + self._resume_hint()
+                )
             self.scaler.scale(loss).backward()
+            # unscale_ is a no-op while the scaler is disabled (bf16 needs no loss
+            # scaling), so the gradients seen below are the ones the optimizer will use.
+            self.scaler.unscale_(self.optimizer)
+            grad_norm = self._checked_grad_norm(epoch, step)
             if self.gradient_clipping is not None:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_value_(self.model.parameters(), self.gradient_clipping)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
             self.scaler.step(self.optimizer)
             self.scaler.update()
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             train_histoy_metrics.accumulate(
-                model=self.model,
+                grad_norm=grad_norm,
                 loss=loss.detach(),
                 pred=pred.detach(),
                 y_labels=y_labels,
                 lr=self._current_lr(),
             )
             if step % self.log_every == 0:
-                pbar.set_postfix(self._postfix(loss, model=self.model))
+                pbar.set_postfix(self._postfix(loss, grad_norm))
         train_histoy_metrics.print_last()
 
     # Validate for classification
