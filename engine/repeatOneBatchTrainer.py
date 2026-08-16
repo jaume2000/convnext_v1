@@ -153,9 +153,10 @@ class Trainer():
     def train_epoch(self, train_histoy_metrics: DictHistoryMetrics, epoch: int, epochs: int):
         self.model.train()
         train_histoy_metrics.create_point()
-        pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
+        #pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
+        pbar = tqdm(range(200), desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
         first_batch, first_y_labels = self.train_loader.dataset[0]
-        for step in range (200):
+        for step in pbar:
             self.optimizer.zero_grad(set_to_none=True)
             batch = self._to_device(first_batch)
             y_labels = first_y_labels.to(self.device, non_blocking=True)

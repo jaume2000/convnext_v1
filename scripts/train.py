@@ -85,7 +85,7 @@ scheduler = CosineWithWarmup(
 print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
 trainer = Trainer(
-    experiment_name="convnextv1_imagenet",
+    experiment_name="convnextv1_imagenet_repeatOneBatch",
     model=model,
     optimizer=optimizer,
     scheduler=scheduler,
