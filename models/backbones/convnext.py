@@ -10,7 +10,7 @@ class ConvNextV1(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.stages = [96, 96 * 2, 96 * 4, 96 * 8]
+        self.stage_dims = [96, 96 * 2, 96 * 4, 96 * 8]
         self.depths = [3, 3, 9, 3]
         self.accum_depths = [0] + [sum(self.depths[:i]) for i in range(1, len(self.depths))]
         self.total_depth = sum(self.depths)
@@ -21,26 +21,26 @@ class ConvNextV1(nn.Module):
         )
         self.stage1 = nn.Sequential(
             *[ConvnextBlock(96, self.drop_paths[i + self.accum_depths[0]]) for i in range(3)],
-            LayerNorm2d(96 * 2),
-            nn.Conv2d(96, 96 * 2, kernel_size=2, stride=2, padding=0),
+            LayerNorm2d(self.stage_dims[0]),
+            nn.Conv2d(self.stage_dims[0], self.stage_dims[1], kernel_size=2, stride=2, padding=0),
         )
         self.stage2 = nn.Sequential(
-            *[ConvnextBlock(96 * 2, self.drop_paths[i + self.accum_depths[1]]) for i in range(3)],
-            LayerNorm2d(96 * 4),
-            nn.Conv2d(96 * 2, 96 * 4, kernel_size=2, stride=2, padding=0),
+            *[ConvnextBlock(self.stage_dims[1], self.drop_paths[i + self.accum_depths[1]]) for i in range(3)],
+            LayerNorm2d(self.stage_dims[1]),
+            nn.Conv2d(self.stage_dims[1], self.stage_dims[2], kernel_size=2, stride=2, padding=0),
         )
         self.stage3 = nn.Sequential(
-            *[ConvnextBlock(96 * 4, self.drop_paths[i + self.accum_depths[2]]) for i in range(9)],
-            LayerNorm2d(96 * 8),
-            nn.Conv2d(96 * 4, 96 * 8, kernel_size=2, stride=2, padding=0),
+            *[ConvnextBlock(self.stage_dims[2], self.drop_paths[i + self.accum_depths[2]]) for i in range(9)],
+            LayerNorm2d(self.stage_dims[3]),
+            nn.Conv2d(self.stage_dims[2], self.stage_dims[3], kernel_size=2, stride=2, padding=0),
         )
-        self.stage4 = nn.Sequential(*[ConvnextBlock(96 * 8, self.drop_paths[i + self.accum_depths[3]]) for i in range(3)])
+        self.stage4 = nn.Sequential(*[ConvnextBlock(self.stage_dims[3], self.drop_paths[i + self.accum_depths[3]]) for i in range(3)])
         self.globalPool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            LayerNorm2d(96 * 8),
+            LayerNorm2d(self.stage_dims[3]),
             nn.Flatten(),
         )
-        self.fc = nn.Linear(96 * 8, 1000)
+        self.fc = nn.Linear(self.stage_dims[3], 1000)
         self.apply(self._init_weights)
 
     @staticmethod
