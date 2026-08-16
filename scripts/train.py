@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from data.imagenet import ImageNetDataset
 from data.transforms.transforms import build_train_batch_transforms, build_train_transforms, build_val_transforms
 from models.backbones.convnext import ConvNextV1
-from engine.trainer import Trainer
+from engine.repeatOneBatchTrainer import Trainer
 from torch.optim import AdamW
 from optim.cosineSchedule import CosineWithWarmup
 from optim.paramGroups import build_param_groups
@@ -19,7 +19,7 @@ BATCH_SIZE = 1024
 LR = 1e-3
 MIN_LR = 1e-6
 # Applied to conv/linear weights only, see build_param_groups.
-WEIGHT_DECAY = 0.1
+WEIGHT_DECAY = 0.05
 
 
 def available_cpus() -> int:
@@ -42,8 +42,8 @@ else:
 
 # train loader and val loader of imagenet with huggingface datasets
 
-train_dataset = ImageNetDataset(split="train", transforms=build_train_transforms())
-val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
+train_dataset = ImageNetDataset(split="train", transforms=None)
+val_dataset = ImageNetDataset(split="validation", transforms=None)
 
 # JPEG decode + RandAugment is the pipeline's bottleneck, so use every allocated core.
 # With automatic batching each worker builds a whole batch, so throughput is
