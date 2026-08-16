@@ -86,14 +86,14 @@ trainer = Trainer(
     model=model,
     optimizer=optimizer,
     scheduler=scheduler,
-    criterion=nn.CrossEntropyLoss(), # SoftTargetCrossEntropy() is not supported for one-hot labels
+    criterion=SoftTargetCrossEntropy(),
     device=device,
     train_loader=train_loader,
     val_loader=val_loader,
-    batch_transforms=build_identity_batch_transforms(),
+    batch_transforms=build_train_batch_transforms(),
     num_classes=1000,
     amp=True,
-    gradient_clipping=None
+    gradient_clipping=20.0
 )
 
 # The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes
