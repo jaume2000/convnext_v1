@@ -160,7 +160,7 @@ class Trainer():
             self.optimizer.zero_grad(set_to_none=True)
             batch = self._to_device(first_batch)
             y_labels = first_y_labels.to(self.device, non_blocking=True)
-            batch, y_labels = self.batch_transforms(batch, y_labels)
+            y_labels = torch.nn.functional.one_hot(y_labels, num_classes=self.num_classes).float()
             with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
                 pred = self.model(batch)
                 loss = self.criterion(pred, y_labels)

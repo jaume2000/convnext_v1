@@ -42,8 +42,8 @@ else:
 
 # train loader and val loader of imagenet with huggingface datasets
 
-train_dataset = ImageNetDataset(split="train", transforms=None)
-val_dataset = ImageNetDataset(split="validation", transforms=None)
+train_dataset = ImageNetDataset(split="train", transforms=build_val_transforms())
+val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
 
 # JPEG decode + RandAugment is the pipeline's bottleneck, so use every allocated core.
 # With automatic batching each worker builds a whole batch, so throughput is
