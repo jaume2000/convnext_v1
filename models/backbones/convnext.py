@@ -1,4 +1,5 @@
 from torch import nn
+import torch
 from torch.nn.init import trunc_normal_
 
 from ..blocks.convenxt_v1 import ConvnextBlock
@@ -6,28 +7,34 @@ from ..blocks.layerNorm2d import LayerNorm2d
 
 
 class ConvNextV1(nn.Module):
+
     def __init__(self):
         super().__init__()
+        self.stages = [96, 96 * 2, 96 * 4, 96 * 8]
+        self.depths = [3, 3, 9, 3]
+        self.accum_depths = [0] + [sum(self.depths[:i]) for i in range(1, len(self.depths))]
+        self.total_depth = sum(self.depths)
+        self.drop_paths = torch.linspace(0, 0.1, self.total_depth).tolist()
         self.stem = nn.Sequential(
             nn.Conv2d(3, 96, kernel_size=4, stride=4, padding=0),
             LayerNorm2d(96),
         )
         self.stage1 = nn.Sequential(
-            *[ConvnextBlock(96, 0.1) for _ in range(3)],
+            *[ConvnextBlock(96, self.drop_paths[i + self.accum_depths[0]]) for i in range(3)],
             LayerNorm2d(96 * 2),
             nn.Conv2d(96, 96 * 2, kernel_size=2, stride=2, padding=0),
         )
         self.stage2 = nn.Sequential(
-            *[ConvnextBlock(96 * 2, 0.1) for _ in range(3)],
+            *[ConvnextBlock(96 * 2, self.drop_paths[i + self.accum_depths[1]]) for i in range(3)],
             LayerNorm2d(96 * 4),
             nn.Conv2d(96 * 2, 96 * 4, kernel_size=2, stride=2, padding=0),
         )
         self.stage3 = nn.Sequential(
-            *[ConvnextBlock(96 * 4, 0.1) for _ in range(9)],
+            *[ConvnextBlock(96 * 4, self.drop_paths[i + self.accum_depths[2]]) for i in range(9)],
             LayerNorm2d(96 * 8),
             nn.Conv2d(96 * 4, 96 * 8, kernel_size=2, stride=2, padding=0),
         )
-        self.stage4 = nn.Sequential(*[ConvnextBlock(96 * 8, 0.1) for _ in range(3)])
+        self.stage4 = nn.Sequential(*[ConvnextBlock(96 * 8, self.drop_paths[i + self.accum_depths[3]]) for i in range(3)])
         self.globalPool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             LayerNorm2d(96 * 8),

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 class LayerNorm2d(nn.Module):
     """Channel-first LayerNorm for NCHW feature maps (ConvNeXt-style)."""
 
-    def __init__(self, num_channels: int, eps: float = 1e-5):
+    def __init__(self, num_channels: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(num_channels))
         self.bias = nn.Parameter(torch.zeros(num_channels))
