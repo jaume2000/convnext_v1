@@ -1,4 +1,5 @@
 from torch import nn
+from torch.nn.init import trunc_normal_
 
 from ..blocks.convenxt_v1 import ConvnextBlock
 from ..blocks.layerNorm2d import LayerNorm2d
@@ -33,6 +34,22 @@ class ConvNextV1(nn.Module):
             nn.Flatten(),
         )
         self.fc = nn.Linear(96 * 8, 1000)
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module: nn.Module):
+        """trunc_normal_(std=0.02), as in the ConvNeXt/DeiT recipes.
+
+        PyTorch's default Kaiming-uniform scales with 1/sqrt(fan_in), which for the 7x7
+        depthwise conv (fan_in 49) means std 0.083 and for the 1x1 expansion std 0.059,
+        i.e. 3-4x wider than intended. LayerScale's 1e-6 hides that at step 0, but the
+        residual branches then carry far more gain than the recipe's LR was tuned for
+        once gamma grows. LayerNorm2d and LayerScale keep their own inits.
+        """
+        if isinstance(module, (nn.Conv2d, nn.Linear)):
+            trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, x):
         x = self.stem(x)

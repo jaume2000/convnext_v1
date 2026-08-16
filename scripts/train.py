@@ -16,7 +16,7 @@ EPOCHS = 300
 WARMUP_EPOCHS = 10
 BATCH_SIZE = 1024
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-3
+LR = 5e-4
 MIN_LR = 1e-6
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
@@ -82,7 +82,7 @@ scheduler = CosineWithWarmup(
 print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
 trainer = Trainer(
-    experiment_name="convnextv1_imagenet_repeatOneBatch",
+    experiment_name="convnextv1_imagenet",
     model=model,
     optimizer=optimizer,
     scheduler=scheduler,
@@ -93,7 +93,7 @@ trainer = Trainer(
     batch_transforms=build_train_batch_transforms(),
     num_classes=1000,
     amp=True,
-    gradient_clipping=20.0
+    gradient_clipping=4.0,
 )
 
 # The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes

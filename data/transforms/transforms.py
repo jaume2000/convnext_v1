@@ -40,9 +40,22 @@ def build_train_batch_transforms(num_classes: int = 1000):
         num_classes=num_classes,
     )
 
-def build_identity_batch_transforms():
+def build_identity_batch_transforms(num_classes: int = 1000, label_smoothing: float = 0.1):
+    """Mixup/CutMix disabled, but still smoothed soft targets.
+
+    Smoothing is not cosmetic here: with hard one-hot targets nothing ever stops
+    rewarding larger logits, so logit magnitudes and gradient norms grow without bound,
+    and the ConvNeXt peak LR (1e-3 at batch 1024) was tuned with Mixup and smoothing
+    supplying that damping. Dropping both at once is what blew up a previous run.
+    """
+    # timm's Mixup spreads the smoothing mass the same way, so switching between this
+    # and build_train_batch_transforms does not change the loss scale.
+    off_value = label_smoothing / num_classes
+    on_value = 1.0 - label_smoothing + off_value
+
     def identity_batch_transforms(batch, y_labels):
         if y_labels.dim() == 1:
-            y_labels = torch.nn.functional.one_hot(y_labels, num_classes=1000).float()
+            y_labels = torch.nn.functional.one_hot(y_labels, num_classes=num_classes).float()
+            y_labels = y_labels * (on_value - off_value) + off_value
         return batch, y_labels
     return identity_batch_transforms

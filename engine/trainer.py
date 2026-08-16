@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -42,7 +43,9 @@ class Trainer():
     channels_last: bool = True,
     log_every: int = 20,
     scheduler=None,
-    gradient_clipping: float | None = None):
+    gradient_clipping: float | None = None,
+    collapse_patience: int | None = 3,
+    collapse_margin: float = 0.01):
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
@@ -61,6 +64,10 @@ class Trainer():
         self.channels_last = channels_last and device.type == "cuda"
         self.log_every = log_every
         self.gradient_clipping = gradient_clipping
+        self.collapse_patience = collapse_patience
+        self.collapse_margin = collapse_margin
+        self._collapsed_epochs = 0
+        self._collapse_armed = False
         self.experiment_path = Path(f"outputs/{self.experiment_name}")
         self.weights_path = self.experiment_path / "weights"
         if device.type == "cuda":
@@ -248,6 +255,59 @@ class Trainer():
         print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
 
+    def _check_collapse(self, train_histoy_metrics: DictHistoryMetrics, epoch: int):
+        """Abort once the model stops beating a constant predictor.
+
+        The inf/NaN guards never fire on a dead network: a run can collapse into a
+        constant output with a perfectly finite loss of exactly ln(num_classes) and a
+        top-1 of 1/num_classes, because the best a class-independent output can do on a
+        balanced set is emit the uniform prior. Everything upstream of the head then
+        gets ~zero gradient, so it is a fixed point rather than a dip -- one previous
+        run sat there for 19 epochs, which is what this check exists to cut short.
+
+        Only the loss is tested. A collapsed grad norm is the more vivid symptom but a
+        noisier rule, whereas "does not beat a constant" is on its own enough to call
+        the run dead whatever the mechanism.
+
+        The check stays disarmed until some epoch has beaten the prior, so that a merely
+        slow start can never abort a job: heavy Mixup plus a warmup LR of 1e-6 can sit
+        near ln(num_classes) for the first epochs perfectly legitimately. What it fires
+        on is a regression away from a state that was already learning.
+        """
+        if self.collapse_patience is None:
+            return
+        uniform_loss = math.log(self.num_classes)
+        train_loss = float(train_histoy_metrics.get("loss").compute_last())
+        if train_loss < uniform_loss - self.collapse_margin:
+            self._collapsed_epochs = 0
+            self._collapse_armed = True
+            return
+        if not self._collapse_armed:
+            return
+        self._collapsed_epochs += 1
+        grad_norm = float(train_histoy_metrics.get("gradnorm").compute_last())
+        print(
+            f"Warning: epoch {epoch + 1} train loss {train_loss:.4f} does not beat the "
+            f"uniform prior ln({self.num_classes})={uniform_loss:.4f} (grad norm "
+            f"{grad_norm:.4f}), {self._collapsed_epochs}/{self.collapse_patience}"
+        )
+        if self._collapsed_epochs < self.collapse_patience:
+            return
+        raise RuntimeError(
+            f"Model collapsed to a constant output: {self._collapsed_epochs} consecutive "
+            f"epochs at or above ln({self.num_classes})={uniform_loss:.4f}, last grad norm "
+            f"{grad_norm:.4f}. Lower the peak LR, enable gradient_clipping, or keep "
+            f"Mixup/CutMix and label smoothing on, then restart. "
+            + self._collapse_resume_hint()
+        )
+
+    def _collapse_resume_hint(self) -> str:
+        return (
+            f"Note that {self.weights_path / 'last.pth'} is already collapsed, so RETAKE=1 "
+            f"would resume the dead model: move it aside first to fall back to "
+            f"{self.weights_path / 'best.pth'}."
+        )
+
     def _step_scheduler_on_epoch(self, val_histoy_metrics: DictHistoryMetrics):
         if self.scheduler is None or not self.scheduler_per_epoch:
             return
@@ -277,6 +337,8 @@ class Trainer():
             self.save_model(name="last", epoch=epoch)
             train_histoy_metrics.save()
             val_histoy_metrics.save()
+            # After the saves, so a collapsed run still leaves its full history on disk.
+            self._check_collapse(train_histoy_metrics, epoch)
         train_histoy_metrics.plot_history()
         val_histoy_metrics.plot_history()
         return train_histoy_metrics, val_histoy_metrics
