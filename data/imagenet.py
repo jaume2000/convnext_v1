@@ -4,9 +4,13 @@ import os
 from torch.utils.data import Dataset
 from datasets import DownloadConfig, IterableDataset, load_dataset
 from PIL import Image
+from torchvision.transforms import ToTensor
 from torchvision.transforms.functional import to_pil_image
 
 from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_transforms
+
+# Fallback when no pipeline is passed: PIL → float CHW tensor in [0, 1].
+_DEFAULT_TRANSFORMS = ToTensor()
 
 
 class ImageNetDataset(Dataset):
@@ -23,7 +27,7 @@ class ImageNetDataset(Dataset):
             cache_dir=cache_dir,
             download_config=DownloadConfig(local_files_only=offline),
         )
-        self.transforms = transforms
+        self.transforms = transforms if transforms is not None else _DEFAULT_TRANSFORMS
         self.streaming = streaming
         if streaming == False:
             self._len = self.ds.__len__()
@@ -43,8 +47,7 @@ class ImageNetDataset(Dataset):
         else:
             img = Image.open(io.BytesIO(img["bytes"])).convert("RGB")
         label = int(row["label"])  # img label index
-        if self.transforms:
-            img = self.transforms(img)
+        img = self.transforms(img)
         return img, label
 
 
