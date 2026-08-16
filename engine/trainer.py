@@ -149,7 +149,7 @@ class Trainer():
                 loss = self.criterion(pred, y_labels)
             # A non-finite loss means the weights are already poisoned, so there is
             # nothing left to salvage by running the backward.
-            if not torch.isfinite(loss).item():
+            if step % self.log_every == 0 and not torch.isfinite(loss).item():
                 raise RuntimeError(
                     f"Non-finite train loss ({loss.item()}) at epoch {epoch + 1}, step {step}. "
                     + self._resume_hint()

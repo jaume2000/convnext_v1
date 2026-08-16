@@ -93,7 +93,7 @@ trainer = Trainer(
     batch_transforms=build_identity_batch_transforms(),
     num_classes=1000,
     amp=True,
-    gradient_clipping=5.0, # norm clipping
+    gradient_clipping=None
 )
 
 # The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes
