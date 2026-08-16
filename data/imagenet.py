@@ -4,13 +4,13 @@ import os
 from torch.utils.data import Dataset
 from datasets import DownloadConfig, IterableDataset, load_dataset
 from PIL import Image
-from torchvision.transforms import ToTensor
+from torchvision.transforms import Compose, Resize, ToTensor
 from torchvision.transforms.functional import to_pil_image
 
 from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_transforms
 
-# Fallback when no pipeline is passed: PIL → float CHW tensor in [0, 1].
-_DEFAULT_TRANSFORMS = ToTensor()
+# Fallback when no pipeline is passed: resize then PIL → float CHW tensor in [0, 1].
+_DEFAULT_TRANSFORMS = Compose([Resize((224, 224)), ToTensor()])
 
 
 class ImageNetDataset(Dataset):

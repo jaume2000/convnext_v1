@@ -10,17 +10,14 @@ from metrics.metricGradNorm import MetricGradNorm
 from metrics.metricLoss import MetricLoss
 from metrics.metricLR import MetricLR
 
-# torch.amp.GradScaler exists on newer PyTorch; cineca-ai 4.1 only has torch.cuda.amp.
+# torch.amp.autocast exists on newer PyTorch; cineca-ai 4.1 only has torch.cuda.amp.
 try:
-    from torch.amp import GradScaler, autocast
+    from torch.amp import autocast
 except ImportError:
     import torch.cuda.amp as _cuda_amp
 
     def autocast(device_type="cuda", enabled=True, **kwargs):
         return _cuda_amp.autocast(enabled=enabled, **kwargs)
-
-    def GradScaler(device="cuda", enabled=True, **kwargs):
-        return _cuda_amp.GradScaler(enabled=enabled, **kwargs)
 
 from data.testingDataset import TestingDataset
 from data.transforms.transforms import build_train_batch_transforms
@@ -42,7 +39,6 @@ class Trainer():
     device: torch.device,
     num_classes: int = 1000,
     amp: bool = True,
-    amp_dtype: str = "auto",
     channels_last: bool = True,
     log_every: int = 20,
     scheduler=None,
@@ -61,10 +57,6 @@ class Trainer():
         self.batch_transforms = batch_transforms
         self.num_classes = num_classes
         self.amp = amp and device.type == "cuda"
-        self.amp_dtype = self._resolve_amp_dtype(amp_dtype)
-        # fp16 needs loss scaling; bf16 has the same exponent range as fp32 and does not,
-        # which also removes the per-step inf check (a host sync) that GradScaler does.
-        self.scaler = GradScaler("cuda", enabled=self.amp and self.amp_dtype == torch.float16)
         # Depthwise 7x7 convs and channel-wise LayerNorm both prefer NHWC on tensor cores.
         self.channels_last = channels_last and device.type == "cuda"
         self.log_every = log_every
@@ -77,12 +69,6 @@ class Trainer():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         self._prepare_model()
-
-    def _resolve_amp_dtype(self, amp_dtype: str) -> torch.dtype:
-        if amp_dtype == "auto":
-            bf16_ok = self.amp and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-            return torch.bfloat16 if bf16_ok else torch.float16
-        return {"bf16": torch.bfloat16, "fp16": torch.float16}[amp_dtype]
 
     def _prepare_model(self):
         self.model.to(self.device)
@@ -111,8 +97,8 @@ class Trainer():
 
         A single inf/NaN gradient makes AdamW write NaN into the parameters *and* into
         its moments, and the moments never recover, so every later epoch trains nothing:
-        a previous run spent 80 epochs that way. Nothing else catches it, since bf16
-        needs no loss scaling and a disabled GradScaler skips its own inf check.
+        a previous run spent 80 epochs that way. bf16 needs no loss scaling, so this is
+        the only check that aborts before the optimizer corrupts its state.
 
         Ordering matters: this runs before clip_grad_norm_, which would multiply every
         gradient by a NaN total norm and erase the evidence of which tensor went first.
@@ -137,7 +123,6 @@ class Trainer():
     def _postfix(self, loss: torch.Tensor, grad_norm: torch.Tensor) -> dict:
         postfix = {
             "loss": f"{loss.item():.3f}",
-            #"amp": str(self.amp_dtype).removeprefix("torch.") if self.amp else "off",
             "grad_norm": f"{grad_norm:.3f}"
         }
         if self.scheduler is not None:
@@ -159,7 +144,7 @@ class Trainer():
             batch = self._to_device(batch)
             y_labels = y_labels.to(self.device, non_blocking=True)
             batch, y_labels = self.batch_transforms(batch, y_labels)
-            with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
+            with autocast("cuda", enabled=self.amp, dtype=torch.bfloat16):
                 pred = self.model(batch)
                 loss = self.criterion(pred, y_labels)
             # A non-finite loss means the weights are already poisoned, so there is
@@ -169,15 +154,11 @@ class Trainer():
                     f"Non-finite train loss ({loss.item()}) at epoch {epoch + 1}, step {step}. "
                     + self._resume_hint()
                 )
-            self.scaler.scale(loss).backward()
-            # unscale_ is a no-op while the scaler is disabled (bf16 needs no loss
-            # scaling), so the gradients seen below are the ones the optimizer will use.
-            self.scaler.unscale_(self.optimizer)
+            loss.backward()
             grad_norm = self._checked_grad_norm(epoch, step)
             if self.gradient_clipping is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            self.optimizer.step()
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             train_histoy_metrics.accumulate(
@@ -201,7 +182,7 @@ class Trainer():
                 batch = self._to_device(batch)
                 y_labels = y_labels.to(self.device, non_blocking=True)
                 y_labels = torch.nn.functional.one_hot(y_labels, num_classes=self.num_classes).float()
-                with autocast("cuda", enabled=self.amp, dtype=self.amp_dtype):
+                with autocast("cuda", enabled=self.amp, dtype=torch.bfloat16):
                     pred = self.model(batch)
                     loss = self.criterion(pred, y_labels)
                 val_histoy_metrics.accumulate(pred=pred.detach(), y_labels=y_labels, loss=loss.detach())
@@ -228,8 +209,6 @@ class Trainer():
             # the loss visibly jumps; older checkpoints simply do not carry it.
             if "optimizer" in ckpt:
                 self.optimizer.load_state_dict(ckpt["optimizer"])
-            if "scaler" in ckpt and self.scaler.is_enabled():
-                self.scaler.load_state_dict(ckpt["scaler"])
             # A plateau schedule cannot be rebuilt from the epoch number: its patience and
             # best-so-far counters are the whole state, so they have to be restored.
             if self.scheduler_per_epoch:
@@ -309,8 +288,6 @@ class Trainer():
             torch.save(state, self.weights_path / f"{name}.pth")
             return
         payload = {"model": state, "epoch": epoch, "optimizer": self.optimizer.state_dict()}
-        if self.scaler.is_enabled():
-            payload["scaler"] = self.scaler.state_dict()
         if self.scheduler_per_epoch:
             payload["scheduler"] = self.scheduler.state_dict()
         torch.save(payload, self.weights_path / f"{name}.pth")

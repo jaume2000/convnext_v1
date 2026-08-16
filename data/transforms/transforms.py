@@ -1,5 +1,6 @@
 # Per image transforms
 
+import torch
 from torchvision.transforms import v2
 from timm.data import create_transform, Mixup
 
@@ -38,3 +39,10 @@ def build_train_batch_transforms(num_classes: int = 1000):
         label_smoothing=0.1,
         num_classes=num_classes,
     )
+
+def build_identity_batch_transforms():
+    def identity_batch_transforms(batch, y_labels):
+        if y_labels.dim() == 1:
+            y_labels = torch.nn.functional.one_hot(y_labels, num_classes=1000).float()
+        return batch, y_labels
+    return identity_batch_transforms

@@ -2,9 +2,9 @@ import os
 
 from torch.utils.data import DataLoader
 from data.imagenet import ImageNetDataset
-from data.transforms.transforms import build_train_batch_transforms, build_train_transforms, build_val_transforms
+from data.transforms.transforms import build_identity_batch_transforms, build_train_batch_transforms, build_train_transforms, build_val_transforms
 from models.backbones.convnext import ConvNextV1
-from engine.repeatOneBatchTrainer import Trainer
+from engine.trainer import Trainer
 from torch.optim import AdamW
 from optim.cosineSchedule import CosineWithWarmup
 from optim.paramGroups import build_param_groups
@@ -45,10 +45,7 @@ else:
 train_dataset = ImageNetDataset(split="train", transforms=build_val_transforms())
 val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
 
-# JPEG decode + RandAugment is the pipeline's bottleneck, so use every allocated core.
-# With automatic batching each worker builds a whole batch, so throughput is
-# num_workers / (batch_size * seconds_per_image): too few workers starves the GPUs.
-num_workers = available_cpus() * 2
+num_workers = available_cpus()
 print(f"Dataloader workers: {num_workers}")
 
 train_loader = DataLoader(
@@ -93,7 +90,7 @@ trainer = Trainer(
     device=device,
     train_loader=train_loader,
     val_loader=val_loader,
-    batch_transforms=build_train_batch_transforms(),
+    batch_transforms=build_identity_batch_transforms(),
     num_classes=1000,
     amp=True,
     gradient_clipping=5.0, # norm clipping
