@@ -92,7 +92,7 @@ trainer = Trainer(
     val_loader=val_loader,
     batch_transforms=build_train_batch_transforms(),
     num_classes=1000,
-    amp=True,
+    amp=False,
     gradient_clipping=None,
 )
 
