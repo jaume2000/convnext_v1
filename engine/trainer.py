@@ -45,7 +45,8 @@ class Trainer():
     scheduler=None,
     gradient_clipping: float | None = None,
     collapse_patience: int | None = 3,
-    collapse_margin: float = 0.01):
+    collapse_margin: float = 0.01,
+    retake: bool = False):
         self.experiment_name = experiment_name
         self.model = model
         self.optimizer = optimizer          # SGD, AdamW, ...
@@ -68,6 +69,7 @@ class Trainer():
         self.collapse_margin = collapse_margin
         self._collapsed_epochs = 0
         self._collapse_armed = False
+        self.retake = retake
         self.experiment_path = Path(f"outputs/{self.experiment_name}")
         self.weights_path = self.experiment_path / "weights"
         if device.type == "cuda":
@@ -96,7 +98,7 @@ class Trainer():
     def _resume_hint(self) -> str:
         return (
             f"{self.weights_path / 'last.pth'} still holds the last finite epoch, "
-            "so RETAKE=1 resumes from there."
+            "so retake=True resumes from there."
         )
 
     def _checked_grad_norm(self, epoch: int, step: int) -> torch.Tensor:
@@ -303,7 +305,7 @@ class Trainer():
 
     def _collapse_resume_hint(self) -> str:
         return (
-            f"Note that {self.weights_path / 'last.pth'} is already collapsed, so RETAKE=1 "
+            f"Note that {self.weights_path / 'last.pth'} is already collapsed, so retake=True "
             f"would resume the dead model: move it aside first to fall back to "
             f"{self.weights_path / 'best.pth'}."
         )
@@ -318,7 +320,7 @@ class Trainer():
             # Replaces ReduceLROnPlateau's verbose flag, which newer PyTorch removed.
             print(f"LR reduced: {lr_before:.2e} -> {lr_after:.2e}")
 
-    def fit(self, epochs, retake: bool = False):
+    def fit(self, epochs):
         train_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="train")
         train_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
         train_histoy_metrics.addHistoryMetric("gradnorm", MetricGradNorm)
@@ -327,7 +329,7 @@ class Trainer():
         val_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="val")
         val_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
         val_histoy_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
-        start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if retake else 0
+        start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if self.retake else 0
         for epoch in range(start_epoch, epochs):
             self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
             self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)

@@ -20,6 +20,8 @@ LR = 5e-4
 MIN_LR = 1e-6
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
+# Chained 12h SLURM jobs set RETAKE=1 in .env to resume without editing this file.
+RETAKE = os.environ.get("RETAKE", "0") == "1"
 
 
 def available_cpus() -> int:
@@ -94,8 +96,6 @@ trainer = Trainer(
     num_classes=1000,
     amp=False,
     gradient_clipping=None,
+    retake=False,
 )
-
-# The 12h wall clock needs several chained jobs, so this is an env var: RETAKE=1 resumes
-# from outputs/<experiment>/weights/last.pth instead of having to edit this file.
-trainer.fit(EPOCHS, retake=os.environ.get("RETAKE", "0") == "1")
+trainer.fit(EPOCHS)
