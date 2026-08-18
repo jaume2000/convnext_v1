@@ -96,6 +96,6 @@ trainer = Trainer(
     num_classes=1000,
     amp=False,
     gradient_clipping=None,
-    retake=False,
+    retake=True,
 )
 trainer.fit(EPOCHS)
