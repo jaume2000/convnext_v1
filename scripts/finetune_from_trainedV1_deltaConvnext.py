@@ -23,7 +23,10 @@ WEIGHT_DECAY = 0.05
 DELTA_WEIGHT_DECAY = 1.0
 # Chained 12h SLURM jobs set RETAKE=1 in .env to resume without editing this file.
 RETAKE = os.environ.get("RETAKE", "0") == "1"
-BASELINE_WEIGHTS = "outputs/outputs/convnextv1_imagenet/weights/last.pth"
+BASELINE_WEIGHTS = os.environ.get(
+    "BASELINE_WEIGHTS",
+    "outputs/convnextv1_imagenet/weights/last.pth",
+)
 
 
 def available_cpus() -> int:

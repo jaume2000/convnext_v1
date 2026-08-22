@@ -24,7 +24,7 @@ def available_cpus() -> int:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ConvNextV1()
-stateDict = torch.load("./outputs/outputs/convnextv1_imagenet/weights/last.pth")["model"]
+stateDict = torch.load("./outputs/convnextv1_imagenet/weights/last.pth")["model"]
 model.load_state_dict(stateDict)
 if device.type == "cuda" and torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)

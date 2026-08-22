@@ -86,7 +86,7 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   exit 1
 fi
 
-BASELINE_WEIGHTS="${BASELINE_WEIGHTS:-${PROJECT_ROOT}/outputs/outputs/convnextv1_imagenet/weights/last.pth}"
+BASELINE_WEIGHTS="${BASELINE_WEIGHTS:-${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth}"
 DELTA_EXPERIMENT="${DELTA_EXPERIMENT:-${PROJECT_ROOT}/outputs/delta_convnextv1_imagenet}"
 RETAKE="${RETAKE:-0}"
 
@@ -141,6 +141,7 @@ echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
 export RETAKE
+export BASELINE_WEIGHTS
 srun python "${TRAIN_SCRIPT}" ${TRAIN_ARGS:-}
 
 echo "End: $(date)"
