@@ -29,18 +29,22 @@ class ImageNetDataset(Dataset):
         offline = os.environ.get("HF_DATASETS_OFFLINE", "0") == "1"
         if split not in _SPLIT_DATA_FILES:
             raise ValueError(f"Unknown split {split!r}; expected one of {sorted(_SPLIT_DATA_FILES)}")
-        # data_files limits which shards are fetched; the dataset card still lists
-        # train/validation/test, so BASIC_CHECKS would raise ExpectedMoreSplitsError.
-        self.ds = load_dataset(
-            "ILSVRC/imagenet-1k",
+        # data_files limits which shards are fetched on a fresh download; the dataset card
+        # still lists train/validation/test, so BASIC_CHECKS would raise ExpectedMoreSplitsError.
+        # Offline (Leonardo compute nodes): the on-disk cache was built as config "default".
+        # Passing data_files makes datasets look for "default-<hash>", which is not present.
+        load_kwargs = dict(
+            path="ILSVRC/imagenet-1k",
             split=split,
-            data_files={split: _SPLIT_DATA_FILES[split]},
             streaming=streaming,
             token=token,
             cache_dir=cache_dir,
             download_config=DownloadConfig(local_files_only=offline),
             verification_mode="no_checks",
         )
+        if not offline:
+            load_kwargs["data_files"] = {split: _SPLIT_DATA_FILES[split]}
+        self.ds = load_dataset(**load_kwargs)
         self.transforms = transforms if transforms is not None else _DEFAULT_TRANSFORMS
         self.streaming = streaming
         if streaming == False:
