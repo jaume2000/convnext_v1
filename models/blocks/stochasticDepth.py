@@ -3,7 +3,7 @@ import torch
 
 class StochasticDepth(nn.Module):
     
-    def __init__(self, p=1.0) -> None:
+    def __init__(self, p=0.0) -> None:
         super().__init__()
         self.keepProb = 1-p
 

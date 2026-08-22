@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 
 class DictHistoryMetrics:
-    def __init__(self, path: Path, split: str):
+    def __init__(self, path: Path, split: str, saveCheckpoints:bool=True):
         self.path = path
         self.split = split
         self.histories: Dict[str, MetricHistory] = {}

@@ -12,6 +12,14 @@ from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_train_
 # Fallback when no pipeline is passed: resize then PIL → float CHW tensor in [0, 1].
 _DEFAULT_TRANSFORMS = Compose([Resize((224, 224)), ToTensor()])
 
+# Without an explicit data_files glob, load_dataset still downloads train+val+test
+# for ILSVRC/imagenet-1k even when split= is set (huggingface/datasets#6793).
+_SPLIT_DATA_FILES = {
+    "train": "data/train-*.parquet",
+    "validation": "data/validation-*.parquet",
+    "test": "data/test-*.parquet",
+}
+
 
 class ImageNetDataset(Dataset):
     def __init__(self, split, transforms=None, streaming=False):
@@ -19,13 +27,19 @@ class ImageNetDataset(Dataset):
         # Parent of ILSVRC___imagenet-1k (e.g. $WORK/huggingface on Leonardo).
         cache_dir = os.environ.get("HF_DATASETS_CACHE") or os.environ.get("HF_HOME")
         offline = os.environ.get("HF_DATASETS_OFFLINE", "0") == "1"
+        if split not in _SPLIT_DATA_FILES:
+            raise ValueError(f"Unknown split {split!r}; expected one of {sorted(_SPLIT_DATA_FILES)}")
+        # data_files limits which shards are fetched; the dataset card still lists
+        # train/validation/test, so BASIC_CHECKS would raise ExpectedMoreSplitsError.
         self.ds = load_dataset(
             "ILSVRC/imagenet-1k",
             split=split,
+            data_files={split: _SPLIT_DATA_FILES[split]},
             streaming=streaming,
             token=token,
             cache_dir=cache_dir,
             download_config=DownloadConfig(local_files_only=offline),
+            verification_mode="no_checks",
         )
         self.transforms = transforms if transforms is not None else _DEFAULT_TRANSFORMS
         self.streaming = streaming

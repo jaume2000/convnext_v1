@@ -20,21 +20,21 @@ class ConvNextV1(nn.Module):
             LayerNorm2d(96),
         )
         self.stage1 = nn.Sequential(
-            *[ConvnextBlock(96, self.drop_paths[i + self.accum_depths[0]]) for i in range(3)],
+            *[ConvnextBlock(96, self.drop_paths[i + self.accum_depths[0]]) for i in range(self.depths[0])],
             LayerNorm2d(self.stage_dims[0]),
             nn.Conv2d(self.stage_dims[0], self.stage_dims[1], kernel_size=2, stride=2, padding=0),
         )
         self.stage2 = nn.Sequential(
-            *[ConvnextBlock(self.stage_dims[1], self.drop_paths[i + self.accum_depths[1]]) for i in range(3)],
+            *[ConvnextBlock(self.stage_dims[1], self.drop_paths[i + self.accum_depths[1]]) for i in range(self.depths[1])],
             LayerNorm2d(self.stage_dims[1]),
             nn.Conv2d(self.stage_dims[1], self.stage_dims[2], kernel_size=2, stride=2, padding=0),
         )
         self.stage3 = nn.Sequential(
-            *[ConvnextBlock(self.stage_dims[2], self.drop_paths[i + self.accum_depths[2]]) for i in range(9)],
+            *[ConvnextBlock(self.stage_dims[2], self.drop_paths[i + self.accum_depths[2]]) for i in range(self.depths[2])],
             LayerNorm2d(self.stage_dims[2]),
             nn.Conv2d(self.stage_dims[2], self.stage_dims[3], kernel_size=2, stride=2, padding=0),
         )
-        self.stage4 = nn.Sequential(*[ConvnextBlock(self.stage_dims[3], self.drop_paths[i + self.accum_depths[3]]) for i in range(3)])
+        self.stage4 = nn.Sequential(*[ConvnextBlock(self.stage_dims[3], self.drop_paths[i + self.accum_depths[3]]) for i in range(self.depths[3])])
         self.globalPool = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             LayerNorm2d(self.stage_dims[3]),

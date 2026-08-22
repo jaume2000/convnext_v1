@@ -1,5 +1,24 @@
 import torch.nn as nn
 
+def build_param_groups_with_delta_weight_decay(model: nn.Module, weight_decay: float, delta_weight_decay: float) -> list[dict]:
+    """Split parameters into base decay, delta decay and non-decayed groups."""
+    base_decayed, delta_decayed, not_decayed = [], [], []
+    for _, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if getattr(param, "isDelta", False):
+            delta_decayed.append(param)
+        else:
+            if param.ndim >= 2:
+                base_decayed.append(param)
+            else:
+                not_decayed.append(param)
+    return [
+        {"params": base_decayed, "weight_decay": weight_decay},
+        {"params": delta_decayed, "weight_decay": delta_weight_decay},
+        {"params": not_decayed, "weight_decay": 0.0},
+    ]
+
 
 def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     """Split parameters into a decayed and a non-decayed group.
