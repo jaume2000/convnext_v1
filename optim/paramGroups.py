@@ -20,7 +20,9 @@ def build_param_groups_with_delta_weight_decay(
 
     assert delta, "No delta params found — ¿corriste rewire() antes de construir los grupos?"
     n_blocks = 9
-    assert len(delta) == 4 * n_blocks, f"Esperaba {4*n_blocks} deltas de conv, hay {len(delta)}"
+    # 6 por bloque: dw, pw1 y pw2, weight y bias. Los deltas de ln y ls van a delta_norm.
+    per_block = 6
+    assert len(delta) == per_block * n_blocks, f"Esperaba {per_block*n_blocks} deltas de conv, hay {len(delta)}"
 
     return [
         {"params": base,       "weight_decay": weight_decay},
