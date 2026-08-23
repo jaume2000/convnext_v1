@@ -68,7 +68,8 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
 # The main process only feeds the GPUs; dataloader workers are single-threaded anyway
 # (torch pins them to 1 thread), and idle OpenMP threads spin-wait and steal their cores.
-export OMP_NUM_THREADS=2
+# 1 rather than 2: the workers inherit this, and they already fill the node on their own.
+export OMP_NUM_THREADS=1
 
 # Hugging Face: compute nodes are offline. Point at the existing cache
 # (parent of ILSVRC___imagenet-1k), e.g. $WORK/huggingface on Leonardo.

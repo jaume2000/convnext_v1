@@ -1,8 +1,14 @@
 import os
+from pathlib import Path
 
 from torch.utils.data import DataLoader
 from data.imagenet import ImageNetDataset
 from data.transforms.transforms import build_identity_batch_transforms, build_train_batch_transforms, build_train_transforms, build_val_transforms
+from metrics.metricGradNorm import MetricGradNorm
+from metrics.metricHistory import DictHistoryMetrics
+from metrics.metricLoss import MetricLoss
+from metrics.metricLR import MetricLR
+from metrics.top1acc import Top1AccMetric
 from models.backbones.convnext import ConvNextV1
 from engine.trainer import Trainer
 from torch.optim import AdamW
@@ -12,6 +18,8 @@ from timm.loss import SoftTargetCrossEntropy
 import torch
 import torch.nn as nn
 
+EXPERIMENT_NAME = "convnextv1_imagenet"
+EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 EPOCHS = 300
 WARMUP_EPOCHS = 20
 BATCH_SIZE = 1024
@@ -83,8 +91,18 @@ scheduler = CosineWithWarmup(
 )
 print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
+# Registration order is the order of the progress bar and of the end-of-epoch print.
+train_history_metrics = DictHistoryMetrics(EXPERIMENT_PATH, split="train")
+train_history_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
+train_history_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+train_history_metrics.addHistoryMetric("gradnorm", MetricGradNorm)
+train_history_metrics.addHistoryMetric("lr", MetricLR)
+val_history_metrics = DictHistoryMetrics(EXPERIMENT_PATH, split="val")
+val_history_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
+val_history_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+
 trainer = Trainer(
-    experiment_name="convnextv1_imagenet",
+    experiment_name=EXPERIMENT_NAME,
     model=model,
     optimizer=optimizer,
     scheduler=scheduler,
@@ -98,4 +116,4 @@ trainer = Trainer(
     gradient_clipping=None,
     retake=True,
 )
-trainer.fit(EPOCHS)
+trainer.fit(EPOCHS, train_history_metrics, val_history_metrics)

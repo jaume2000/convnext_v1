@@ -1,22 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=finetune_delta
+#SBATCH --job-name=train_delta
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# Booster nodes are 32 cores / 4 GPUs; asking for fewer just idles dataloader cores.
+# Booster nodes are 32 cores (1x Xeon 8358) / 4 GPUs, so the 4 ranks get 8 dataloader
+# workers each (see available_cpus() in the train script); fewer just idles cores.
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
-#SBATCH --output=logs/finetune_delta_convnext_%j.out
-#SBATCH --error=logs/finetune_delta_convnext_%j.err
+#SBATCH --output=logs/train_delta_convnext_%j.out
+#SBATCH --error=logs/train_delta_convnext_%j.err
 
 # Submit from the repo root:
-#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/finetune_delta_convnext.sh
+#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_delta_convnext.sh
 #
 # Chain 12 h jobs after the first segment (or a time-limit kill):
 #   echo 'RETAKE=1' >> .env   # or export RETAKE=1 for one submission
-#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/finetune_delta_convnext.sh
+#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_delta_convnext.sh
 #
 # Optional overrides:
 #   TRAIN_SCRIPT=scripts/bench.py TRAIN_ARGS="--skip-gpu" sbatch ...
@@ -67,8 +68,9 @@ fi
 
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
-# 1, not 2: dataloader workers inherit this and already fill the node's 32 cores on their
-# own, so a second OpenMP thread each would only oversubscribe it.
+# 1, not 2: this is inherited by every dataloader worker, and the 32 workers already fill
+# the node's 32 cores on their own. The main processes only feed the GPUs, so they have no
+# use for a second thread either.
 export OMP_NUM_THREADS=1
 
 HF_HOME="${HF_HOME:-${WORK:+$WORK/huggingface}}"
@@ -88,19 +90,13 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   exit 1
 fi
 
-BASELINE_WEIGHTS="${BASELINE_WEIGHTS:-${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth}"
 DELTA_EXPERIMENT="${DELTA_EXPERIMENT:-${PROJECT_ROOT}/outputs/delta_convnextv1_imagenet}"
 RETAKE="${RETAKE:-0}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 if [[ "${RETAKE}" == "1" ]]; then
   if [[ ! -f "${DELTA_EXPERIMENT}/weights/last.pth" ]]; then
     echo "RETAKE=1 but delta checkpoint not found at ${DELTA_EXPERIMENT}/weights/last.pth" >&2
-    exit 1
-  fi
-else
-  if [[ ! -f "${BASELINE_WEIGHTS}" ]]; then
-    echo "Baseline ConvNeXt weights not found at ${BASELINE_WEIGHTS}" >&2
-    echo "Train the baseline first, or set BASELINE_WEIGHTS in .env." >&2
     exit 1
   fi
 fi
@@ -126,7 +122,7 @@ if [[ "${STAGE_DATA:-1}" == "1" ]]; then
   fi
 fi
 
-TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/finetune_from_trainedV1_deltaConvnext.py}"
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_deltaConvnextV1.py}"
 
 echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
@@ -137,13 +133,14 @@ echo "Account: ${SLURM_ACCOUNT:-unset}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "RETAKE: ${RETAKE}"
 echo "Train script: ${TRAIN_SCRIPT}"
-echo "Baseline weights: ${BASELINE_WEIGHTS}"
 echo "Delta experiment: ${DELTA_EXPERIMENT}"
+echo "nproc_per_node: ${NPROC_PER_NODE}"
 echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
 export RETAKE
-export BASELINE_WEIGHTS
-srun python "${TRAIN_SCRIPT}" ${TRAIN_ARGS:-}
+# DDP needs torchrun so each rank gets LOCAL_RANK / RANK / WORLD_SIZE.
+# Do not launch with bare `python`: that keeps a single process on one GPU.
+torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" "${TRAIN_SCRIPT}" ${TRAIN_ARGS:-}
 
 echo "End: $(date)"

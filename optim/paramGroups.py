@@ -1,24 +1,33 @@
 import torch.nn as nn
 
-def build_param_groups_with_delta_weight_decay(model: nn.Module, weight_decay: float, delta_weight_decay: float) -> list[dict]:
-    """Split parameters into base decay, delta decay and non-decayed groups."""
-    base_decayed, delta_decayed, not_decayed = [], [], []
-    for _, param in model.named_parameters():
+
+def build_param_groups_with_delta_weight_decay(
+    model: nn.Module,
+    weight_decay: float,
+    delta_weight_decay: float,
+    delta_norm_weight_decay: float = 0.0,
+) -> list[dict]:
+    NORM_DELTAS = ("lnWDelta", "lnBDelta", "lsDelta")
+    base, delta, delta_norm, none = [], [], [], []
+    
+    for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if getattr(param, "isDelta", False):
-            delta_decayed.append(param)
+        if name.endswith("Delta"):
+            (delta_norm if name.split(".")[-1] in NORM_DELTAS else delta).append(param)
         else:
-            if param.ndim >= 2:
-                base_decayed.append(param)
-            else:
-                not_decayed.append(param)
-    return [
-        {"params": base_decayed, "weight_decay": weight_decay},
-        {"params": delta_decayed, "weight_decay": delta_weight_decay},
-        {"params": not_decayed, "weight_decay": 0.0},
-    ]
+            (base if param.ndim >= 2 else none).append(param)
 
+    assert delta, "No delta params found — ¿corriste rewire() antes de construir los grupos?"
+    n_blocks = 9
+    assert len(delta) == 4 * n_blocks, f"Esperaba {4*n_blocks} deltas de conv, hay {len(delta)}"
+
+    return [
+        {"params": base,       "weight_decay": weight_decay},
+        {"params": delta,      "weight_decay": delta_weight_decay},
+        {"params": delta_norm, "weight_decay": delta_norm_weight_decay},
+        {"params": none,       "weight_decay": 0.0},
+    ]
 
 def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     """Split parameters into a decayed and a non-decayed group.

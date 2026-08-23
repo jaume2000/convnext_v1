@@ -7,15 +7,29 @@ import matplotlib.pyplot as plt
 
 
 class DictHistoryMetrics:
-    def __init__(self, path: Path, split: str, saveCheckpoints:bool=True):
-        self.path = path
+    def __init__(self, path: Path | str, split: str, saveCheckpoints:bool=True):
+        # Coerced rather than trusted: a str would survive a whole epoch of training and
+        # only blow up on the first save, at the / operator.
+        self.path = Path(path)
         self.split = split
         self.histories: Dict[str, MetricHistory] = {}
 
-    def addHistoryMetric(self, name: str, metricClass: type[Metric], higher_is_better: bool = True):
+    def addHistoryMetric(
+        self,
+        name: str,
+        metricClass: type[Metric],
+        higher_is_better: bool = True,
+        optional: bool = False,
+        **metric_kwargs,
+    ):
         full_name = f"{self.split}_{name}"
         self.histories[name] = MetricHistory(
-            self.path, metricClass, full_name, higher_is_better=higher_is_better
+            self.path,
+            metricClass,
+            full_name,
+            higher_is_better=higher_is_better,
+            optional=optional,
+            metric_kwargs=metric_kwargs,
         )
 
     def accumulate(self, **kwargs):
@@ -29,10 +43,22 @@ class DictHistoryMetrics:
     def get(self, name: str) -> "MetricHistory":
         return self.histories[name]
 
+    def pbar(self) -> Dict[str, str]:
+        """Progress bar entries of every metric that asked for one."""
+        entries = {}
+        for name, histmetric in self.histories.items():
+            value = histmetric.pbar_value()
+            if value is not None:
+                entries[name] = value
+        return entries
+
     def num_epochs(self) -> int:
-        if not self.histories:
+        # Metrics added after a run started have no history yet, and they should not drag
+        # the resume point back to epoch 0.
+        lengths = [len(h.metricHistory) for h in self.histories.values() if h.metricHistory]
+        if not lengths:
             return 0
-        return min(len(h.metricHistory) for h in self.histories.values())
+        return min(lengths)
 
     def plot_history(self, names: list[str] | None = None):
         names = names if names is not None else list(self.histories.keys())
@@ -47,7 +73,11 @@ class DictHistoryMetrics:
     def load(self) -> bool:
         if not self.histories:
             return False
-        return all(histmetric.load() for histmetric in self.histories.values())
+        loaded = True
+        for histmetric in self.histories.values():
+            if not histmetric.load() and not histmetric.optional:
+                loaded = False
+        return loaded
 
     def drop_empty_trailing(self):
         for histmetric in self.histories.values():
@@ -56,6 +86,10 @@ class DictHistoryMetrics:
     def truncate(self, n: int):
         for histmetric in self.histories.values():
             histmetric.truncate(n)
+
+    def pad_to(self, n: int):
+        for histmetric in self.histories.values():
+            histmetric.pad_to(n)
 
     def restore_best(self, name: str | None = None):
         if name is not None:
@@ -79,12 +113,16 @@ class MetricHistory:
         metric_cls: type[Metric],
         name: str,
         higher_is_better: bool = True,
+        optional: bool = False,
+        metric_kwargs: dict | None = None,
     ):
         self.metricHistory: list[Metric] = []
-        self.path = path
+        self.path = Path(path)
         self.metric_cls = metric_cls
         self.name = name
         self.higher_is_better = higher_is_better
+        self.optional = optional
+        self.metric_kwargs = metric_kwargs or {}
         self.best_metric = None
         self.best_metric_index = None
 
@@ -95,10 +133,15 @@ class MetricHistory:
         return self.metricHistory[-1].compute_metric()
 
     def create_point(self):
-        self.append(self.metric_cls())
+        self.append(self.metric_cls(**self.metric_kwargs))
 
     def accumulate_last_point(self, **kwargs):
         self.metricHistory[-1].accumulate(**kwargs)
+
+    def pbar_value(self) -> str | None:
+        if not self.metricHistory:
+            return None
+        return self.metricHistory[-1].pbar_value()
 
     def save(self):
         Path(self.path / "history").mkdir(parents=True, exist_ok=True)
@@ -108,13 +151,21 @@ class MetricHistory:
         self.toCSV()
 
     def toCSV(self):
+        rows = []
+        columns: list[str] = []
+        for i, metric in enumerate(self.metricHistory):
+            if metric.total_samples == 0:
+                continue
+            components = metric.compute_components()
+            for key in components:
+                if key not in columns:
+                    columns.append(key)
+            rows.append((i, float(metric.compute_metric()), components))
         with open(self.path / "results" / f"{self.name}_history.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Epoch", "value"])
-            for i, metric in enumerate(self.metricHistory):
-                if metric.total_samples == 0:
-                    continue
-                writer.writerow([i, float(metric.compute_metric())])
+            writer.writerow(["Epoch", "value", *columns])
+            for i, value, components in rows:
+                writer.writerow([i, value, *(components.get(key, "") for key in columns)])
 
     def history_path(self) -> Path:
         return self.path / "history" / f"{self.name}_history.pkl"
@@ -133,6 +184,10 @@ class MetricHistory:
 
     def truncate(self, n: int):
         self.metricHistory = self.metricHistory[:n]
+
+    def pad_to(self, n: int):
+        while len(self.metricHistory) < n:
+            self.create_point()
 
     def _is_better(self, value, best) -> bool:
         if self.higher_is_better:
@@ -156,6 +211,11 @@ class MetricHistory:
 
     def plot_history(self):
         Path(self.path / "plots").mkdir(parents=True, exist_ok=True)
+        # A metric whose epoch value is an aggregate of many series draws its own figures.
+        plot_series = getattr(self.metric_cls, "plot_series", None)
+        if plot_series is not None:
+            plot_series(self.metricHistory, self.path / "plots", self.name)
+            return
         values = [float(metric.compute_metric()) for metric in self.metricHistory]
         plt.plot(values)
         plt.xlabel("Epoch")

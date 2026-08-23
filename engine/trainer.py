@@ -1,9 +1,11 @@
 import math
 from pathlib import Path
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
@@ -84,6 +86,20 @@ class Trainer():
         if self.channels_last:
             self.model.to(memory_format=torch.channels_last)
 
+    def _is_main_process(self) -> bool:
+        return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
+    def _unwrap_model(self) -> nn.Module:
+        return self.model.module if isinstance(self.model, (nn.DataParallel, DDP)) else self.model
+
+    def _broadcast_from_main(self, flag: bool) -> bool:
+        """Give every rank rank 0's answer, so a decision made from the metrics is unanimous."""
+        if not (dist.is_available() and dist.is_initialized()):
+            return flag
+        payload = torch.tensor([1 if flag else 0], device=self.device)
+        dist.broadcast(payload, src=0)
+        return bool(payload.item())
+
     def _to_device(self, batch: torch.Tensor) -> torch.Tensor:
         batch = batch.to(self.device, non_blocking=True)
         if self.channels_last:
@@ -112,8 +128,9 @@ class Trainer():
         Ordering matters: this runs before clip_grad_norm_, which would multiply every
         gradient by a NaN total norm and erase the evidence of which tensor went first.
         """
-        target = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
-        named_grads = [(name, p.grad) for name, p in target.named_parameters() if p.grad is not None]
+        named_grads = [
+            (name, p.grad) for name, p in self._unwrap_model().named_parameters() if p.grad is not None
+        ]
         # Norm of the per-tensor norms is the global norm, and it also says which tensor
         # is the culprit without a second pass over the gradients.
         norms = torch.stack([grad.float().norm() for _, grad in named_grads])
@@ -129,13 +146,9 @@ class Trainer():
             + self._resume_hint()
         )
 
-    def _postfix(self, loss: torch.Tensor, grad_norm: torch.Tensor) -> dict:
-        postfix = {
-            "loss": f"{loss.item():.3f}",
-            "grad_norm": f"{grad_norm:.3f}"
-        }
-        if self.scheduler is not None:
-            postfix["lr"] = f"{self._current_lr():.2e}"
+    def _postfix(self, history_metrics: DictHistoryMetrics) -> dict:
+        """Whatever the metrics want shown, plus the one number no metric owns."""
+        postfix = history_metrics.pbar()
         if self.device.type == "cuda":
             # YOLO-style: reserved VRAM per visible GPU (GiB).
             postfix["vram"] = " ".join(
@@ -144,10 +157,26 @@ class Trainer():
             )
         return postfix
 
-    def train_epoch(self, train_histoy_metrics: DictHistoryMetrics, epoch: int, epochs: int):
+    def train_epoch(self, train_history_metrics: DictHistoryMetrics, epoch: int, epochs: int):
         self.model.train()
-        train_histoy_metrics.create_point()
-        pbar = tqdm(self.train_loader, desc=f"train {epoch + 1}/{epochs}", mininterval=1.0)
+        # Without set_epoch, DistributedSampler reuses the same shuffle every epoch.
+        if hasattr(self.train_loader.sampler, "set_epoch"):
+            self.train_loader.sampler.set_epoch(epoch)
+        # Metrics that read the weights want the model itself, not the DDP wrapper.
+        model = self._unwrap_model()
+        # Rank 0 alone keeps the metrics. The weights are identical on every rank after
+        # the gradient all-reduce, so the others would recompute the same numbers, and
+        # the ones that do differ (loss, top-1) only describe that rank's shard anyway.
+        # Nothing here communicates, so skipping it off-rank cannot desync the group.
+        main = self._is_main_process()
+        if main:
+            train_history_metrics.create_point()
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"train {epoch + 1}/{epochs}",
+            mininterval=1.0,
+            disable=not main,
+        )
         for step, (batch, y_labels) in enumerate(pbar):
             self.optimizer.zero_grad(set_to_none=True)
             batch = self._to_device(batch)
@@ -170,7 +199,10 @@ class Trainer():
             self.optimizer.step()
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
-            train_histoy_metrics.accumulate(
+            if not main:
+                continue
+            train_history_metrics.accumulate(
+                model=model,
                 grad_norm=grad_norm,
                 loss=loss.detach(),
                 pred=pred.detach(),
@@ -178,14 +210,21 @@ class Trainer():
                 lr=self._current_lr(),
             )
             if step % self.log_every == 0:
-                pbar.set_postfix(self._postfix(loss, grad_norm))
-        train_histoy_metrics.print_last()
+                pbar.set_postfix(self._postfix(train_history_metrics))
+        if main:
+            train_history_metrics.print_last()
 
     # Validate for classification
-    def validate(self, val_histoy_metrics: DictHistoryMetrics, epoch: int, epochs: int):
+    def validate(self, val_history_metrics: DictHistoryMetrics, epoch: int, epochs: int):
         self.model.eval()
-        pbar = tqdm(self.val_loader, desc=f"val {epoch + 1}/{epochs}", mininterval=1.0)
-        val_histoy_metrics.create_point()
+        model = self._unwrap_model()
+        pbar = tqdm(
+            self.val_loader,
+            desc=f"val {epoch + 1}/{epochs}",
+            mininterval=1.0,
+            disable=not self._is_main_process(),
+        )
+        val_history_metrics.create_point()
         with torch.inference_mode():
             for step, (batch, y_labels) in enumerate(pbar):
                 batch = self._to_device(batch)
@@ -194,10 +233,15 @@ class Trainer():
                 with autocast("cuda", enabled=self.amp, dtype=torch.bfloat16):
                     pred = self.model(batch)
                     loss = self.criterion(pred, y_labels)
-                val_histoy_metrics.accumulate(pred=pred.detach(), y_labels=y_labels, loss=loss.detach())
+                val_history_metrics.accumulate(
+                    model=model, pred=pred.detach(), y_labels=y_labels, loss=loss.detach()
+                )
                 if step % self.log_every == 0:
-                    pbar.set_postfix(loss=loss.item())
-        val_histoy_metrics.print_last()
+                    pbar.set_postfix(self._postfix(val_history_metrics))
+            #if printValidationStats in self.model
+            if hasattr(self.model, "printValidationStats"):
+                self.model.printValidationStats()
+        val_history_metrics.print_last()
 
     def _load_checkpoint(self, name: str = "last"):
         path = self.weights_path / f"{name}.pth"
@@ -211,8 +255,7 @@ class Trainer():
             # Legacy raw state_dict checkpoints.
             state = ckpt
             epoch = None
-        target = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
-        target.load_state_dict(state)
+        self._unwrap_model().load_state_dict(state)
         if isinstance(ckpt, dict):
             # Without the optimizer state, every restart throws away AdamW's moments and
             # the loss visibly jumps; older checkpoints simply do not carry it.
@@ -227,37 +270,42 @@ class Trainer():
                     print("Warning: checkpoint has no scheduler state, plateau counters restart")
         return epoch
 
-    def _retake(self, train_histoy_metrics: DictHistoryMetrics, val_histoy_metrics: DictHistoryMetrics) -> int:
+    def _retake(self, train_history_metrics: DictHistoryMetrics, val_history_metrics: DictHistoryMetrics) -> int:
         ckpt_name = "last" if (self.weights_path / "last.pth").is_file() else "best"
         ckpt_epoch = self._load_checkpoint(ckpt_name)
-        train_loaded = train_histoy_metrics.load()
-        val_loaded = val_histoy_metrics.load()
+        train_loaded = train_history_metrics.load()
+        val_loaded = val_history_metrics.load()
         if not train_loaded or not val_loaded:
             raise FileNotFoundError(
                 f"retake=True requires train/val history under {self.experiment_path / 'history'}"
             )
 
-        train_histoy_metrics.drop_empty_trailing()
-        val_histoy_metrics.drop_empty_trailing()
+        train_history_metrics.drop_empty_trailing()
+        val_history_metrics.drop_empty_trailing()
 
         if ckpt_epoch is not None:
             start_epoch = ckpt_epoch + 1
         else:
-            start_epoch = min(train_histoy_metrics.num_epochs(), val_histoy_metrics.num_epochs())
+            start_epoch = min(train_history_metrics.num_epochs(), val_history_metrics.num_epochs())
 
-        train_histoy_metrics.truncate(start_epoch)
-        val_histoy_metrics.truncate(start_epoch)
-        val_histoy_metrics.restore_best("top1acc")
-        train_histoy_metrics.save()
-        val_histoy_metrics.save()
+        train_history_metrics.truncate(start_epoch)
+        val_history_metrics.truncate(start_epoch)
+        # Metrics added mid-run start short: pad them so epoch N stays at index N.
+        train_history_metrics.pad_to(start_epoch)
+        val_history_metrics.pad_to(start_epoch)
+        val_history_metrics.restore_best("top1acc")
+        if self._is_main_process():
+            train_history_metrics.save()
+            val_history_metrics.save()
         if self.scheduler is not None and not self.scheduler_per_epoch:
             # Derived from the epoch rather than stored, so the schedule stays correct
             # even for checkpoints written before it existed.
             self.scheduler.set_step(start_epoch * len(self.train_loader))
-        print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
+        if self._is_main_process():
+            print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
 
-    def _check_collapse(self, train_histoy_metrics: DictHistoryMetrics, epoch: int):
+    def _check_collapse(self, train_history_metrics: DictHistoryMetrics, epoch: int):
         """Abort once the model stops beating a constant predictor.
 
         The inf/NaN guards never fire on a dead network: a run can collapse into a
@@ -275,33 +323,42 @@ class Trainer():
         slow start can never abort a job: heavy Mixup plus a warmup LR of 1e-6 can sit
         near ln(num_classes) for the first epochs perfectly legitimately. What it fires
         on is a regression away from a state that was already learning.
+
+        Only rank 0 holds the metrics, so only rank 0 has an opinion; it broadcasts the
+        verdict because a rank that aborted alone would leave the rest hanging on the
+        next collective. Every rank must therefore reach the broadcast.
         """
         if self.collapse_patience is None:
             return
+        collapsed = self._is_main_process() and self._collapsed_this_epoch(train_history_metrics, epoch)
+        if not self._broadcast_from_main(collapsed):
+            return
+        raise RuntimeError(
+            f"Model collapsed to a constant output: {self.collapse_patience} consecutive "
+            f"epochs at or above ln({self.num_classes})={math.log(self.num_classes):.4f}. "
+            f"Lower the peak LR, enable gradient_clipping, or keep Mixup/CutMix and label "
+            f"smoothing on, then restart. "
+            + self._collapse_resume_hint()
+        )
+
+    def _collapsed_this_epoch(self, train_history_metrics: DictHistoryMetrics, epoch: int) -> bool:
+        """Advance the collapse counter on this epoch's metrics, rank 0 only."""
         uniform_loss = math.log(self.num_classes)
-        train_loss = float(train_histoy_metrics.get("loss").compute_last())
+        train_loss = float(train_history_metrics.get("loss").compute_last())
         if train_loss < uniform_loss - self.collapse_margin:
             self._collapsed_epochs = 0
             self._collapse_armed = True
-            return
+            return False
         if not self._collapse_armed:
-            return
+            return False
         self._collapsed_epochs += 1
-        grad_norm = float(train_histoy_metrics.get("gradnorm").compute_last())
+        grad_norm = float(train_history_metrics.get("gradnorm").compute_last())
         print(
             f"Warning: epoch {epoch + 1} train loss {train_loss:.4f} does not beat the "
             f"uniform prior ln({self.num_classes})={uniform_loss:.4f} (grad norm "
             f"{grad_norm:.4f}), {self._collapsed_epochs}/{self.collapse_patience}"
         )
-        if self._collapsed_epochs < self.collapse_patience:
-            return
-        raise RuntimeError(
-            f"Model collapsed to a constant output: {self._collapsed_epochs} consecutive "
-            f"epochs at or above ln({self.num_classes})={uniform_loss:.4f}, last grad norm "
-            f"{grad_norm:.4f}. Lower the peak LR, enable gradient_clipping, or keep "
-            f"Mixup/CutMix and label smoothing on, then restart. "
-            + self._collapse_resume_hint()
-        )
+        return self._collapsed_epochs >= self.collapse_patience
 
     def _collapse_resume_hint(self) -> str:
         return (
@@ -310,44 +367,57 @@ class Trainer():
             f"{self.weights_path / 'best.pth'}."
         )
 
-    def _step_scheduler_on_epoch(self, val_histoy_metrics: DictHistoryMetrics):
+    def _step_scheduler_on_epoch(self, val_history_metrics: DictHistoryMetrics):
         if self.scheduler is None or not self.scheduler_per_epoch:
             return
         lr_before = self.optimizer.param_groups[0]["lr"]
-        self.scheduler.step(val_histoy_metrics.get("loss").compute_last())
+        self.scheduler.step(val_history_metrics.get("loss").compute_last())
         lr_after = self.optimizer.param_groups[0]["lr"]
         if lr_after != lr_before:
             # Replaces ReduceLROnPlateau's verbose flag, which newer PyTorch removed.
             print(f"LR reduced: {lr_before:.2e} -> {lr_after:.2e}")
 
-    def fit(self, epochs):
-        train_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="train")
-        train_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
-        train_histoy_metrics.addHistoryMetric("gradnorm", MetricGradNorm)
-        train_histoy_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
-        train_histoy_metrics.addHistoryMetric("lr", MetricLR)
-        val_histoy_metrics = DictHistoryMetrics(self.experiment_path, split="val")
-        val_histoy_metrics.addHistoryMetric("top1acc", Top1AccMetric)
-        val_histoy_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
-        start_epoch = self._retake(train_histoy_metrics, val_histoy_metrics) if self.retake else 0
+    def fit(
+        self,
+        epochs: int,
+        train_history_metrics: DictHistoryMetrics,
+        val_history_metrics: DictHistoryMetrics,
+    ):
+        """Train for `epochs`, accumulating into the histories the caller built.
+
+        Which metrics a run tracks is the experiment's choice, not the engine's, so the
+        histories come from the script: anything model-specific (delta ratios, say)
+        reads what it needs off the `model` handed to accumulate(). Three names are
+        still expected: train "loss" and "gradnorm" for the collapse check, and val
+        "top1acc" to pick the best checkpoint.
+        """
+        start_epoch = self._retake(train_history_metrics, val_history_metrics) if self.retake else 0
         for epoch in range(start_epoch, epochs):
-            self.train_epoch(train_histoy_metrics, epoch=epoch, epochs=epochs)
-            self.validate(val_histoy_metrics, epoch=epoch, epochs=epochs)
-            self._step_scheduler_on_epoch(val_histoy_metrics)
-            if val_histoy_metrics.last_is_best("top1acc"):
-                self.save_model(name="best", epoch=epoch)
-            self.save_model(name="last", epoch=epoch)
-            train_histoy_metrics.save()
-            val_histoy_metrics.save()
+            self.train_epoch(train_history_metrics, epoch=epoch, epochs=epochs)
+            # Rank 0 alone validates the full set; others wait so the next DDP train step stays synced.
+            if self._is_main_process():
+                self.validate(val_history_metrics, epoch=epoch, epochs=epochs)
+                self._step_scheduler_on_epoch(val_history_metrics)
+                if val_history_metrics.last_is_best("top1acc"):
+                    self.save_model(name="best", epoch=epoch)
+                self.save_model(name="last", epoch=epoch)
+                train_history_metrics.save()
+                val_history_metrics.save()
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
             # After the saves, so a collapsed run still leaves its full history on disk.
-            self._check_collapse(train_histoy_metrics, epoch)
-        train_histoy_metrics.plot_history()
-        val_histoy_metrics.plot_history()
-        return train_histoy_metrics, val_histoy_metrics
+            # Every rank calls in: rank 0 decides and the others wait for its verdict.
+            self._check_collapse(train_history_metrics, epoch)
+        if self._is_main_process():
+            train_history_metrics.plot_history()
+            val_history_metrics.plot_history()
+        return train_history_metrics, val_history_metrics
 
     def save_model(self, name: str, epoch=None):
+        if not self._is_main_process():
+            return
         self.weights_path.mkdir(parents=True, exist_ok=True)
-        state = self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
+        state = self._unwrap_model().state_dict()
         if epoch is None:
             torch.save(state, self.weights_path / f"{name}.pth")
             return
@@ -384,7 +454,16 @@ def main():
         num_classes=num_classes,
         amp=True,
     )
-    trainer.fit(epochs=10)
+    experiment_path = Path("outputs/test")
+    train_history_metrics = DictHistoryMetrics(experiment_path, split="train")
+    train_history_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
+    train_history_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+    train_history_metrics.addHistoryMetric("gradnorm", MetricGradNorm)
+    train_history_metrics.addHistoryMetric("lr", MetricLR)
+    val_history_metrics = DictHistoryMetrics(experiment_path, split="val")
+    val_history_metrics.addHistoryMetric("loss", MetricLoss, higher_is_better=False)
+    val_history_metrics.addHistoryMetric("top1acc", Top1AccMetric)
+    trainer.fit(epochs=10, train_history_metrics=train_history_metrics, val_history_metrics=val_history_metrics)
 
 if __name__ == "__main__":
     main()
