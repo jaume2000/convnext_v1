@@ -22,7 +22,7 @@ from timm.loss import SoftTargetCrossEntropy
 import torch
 
 
-EXPERIMENT_NAME = "delta_convnextv1_imagenet"
+EXPERIMENT_NAME = "shared_convnextv1_imagenet"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DDP = True
 EPOCHS = 300
@@ -66,7 +66,7 @@ else:
     device = torch.device("cpu")
     use_ddp = False
 
-model = DeltaConvNext()
+model = DeltaConvNext(useDeltas=False)
 model.rewire()
 model = model.to(device)
 if use_ddp:

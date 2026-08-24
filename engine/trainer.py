@@ -150,11 +150,11 @@ class Trainer():
         """Whatever the metrics want shown, plus the one number no metric owns."""
         postfix = history_metrics.pbar()
         if self.device.type == "cuda":
-            # YOLO-style: reserved VRAM per visible GPU (GiB).
-            postfix["vram"] = " ".join(
-                f"{torch.cuda.memory_reserved(i) / (1024 ** 3):.1f}G"
-                for i in range(torch.cuda.device_count())
-            )
+            # Reserved VRAM (GiB) on this rank's GPU only. The allocator reports what this
+            # process reserved, and under DDP the other GPUs belong to other processes, so
+            # asking about them here just returns zero. The ranks hold the same model and
+            # the same batch size, so this number stands for all of them.
+            postfix["vram"] = f"{torch.cuda.memory_reserved(self.device) / (1024 ** 3):.1f}G"
         return postfix
 
     def train_epoch(self, train_history_metrics: DictHistoryMetrics, epoch: int, epochs: int):
@@ -197,6 +197,8 @@ class Trainer():
             if self.gradient_clipping is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
             self.optimizer.step()
+            if hasattr(self.model, "reparametrize"):
+                self.model.reparametrize()
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             if not main:
