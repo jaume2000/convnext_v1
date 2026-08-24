@@ -14,13 +14,14 @@ class DeltaConvnextBlock(nn.Module):
         object.__setattr__(self, "_shared", sharedBlock)
         self.useDeltas = useDeltas
 
-        dw, ln, pw1, _, pw2, ls = sharedBlock
-        z = lambda t: nn.Parameter(torch.zeros_like(t))
-        self.dwWDelta,  self.dwBDelta  = z(dw.weight),  z(dw.bias)
-        self.lnWDelta,  self.lnBDelta  = z(ln.weight),  z(ln.bias)
-        self.pw1WDelta, self.pw1BDelta = z(pw1.weight), z(pw1.bias)
-        self.pw2WDelta, self.pw2BDelta = z(pw2.weight), z(pw2.bias)
-        self.lsDelta                   = z(ls.gamma)
+        if useDeltas:
+            dw, ln, pw1, _, pw2, ls = sharedBlock
+            z = lambda t: nn.Parameter(torch.zeros_like(t))
+            self.dwWDelta,  self.dwBDelta  = z(dw.weight),  z(dw.bias)
+            self.lnWDelta,  self.lnBDelta  = z(ln.weight),  z(ln.bias)
+            self.pw1WDelta, self.pw1BDelta = z(pw1.weight), z(pw1.bias)
+            self.pw2WDelta, self.pw2BDelta = z(pw2.weight), z(pw2.bias)
+            self.lsDelta                   = z(ls.gamma)
 
         self.stochasticDepth = StochasticDepth(stochasticDepth)
 
@@ -39,13 +40,45 @@ class DeltaConvnextBlock(nn.Module):
         "pw2.bias": "pw2BDelta",
     }
 
+    def has_deltas(self) -> bool:
+        return hasattr(self, "dwWDelta")
+
+    def init_deltas(self):
+        """Allocate zero delta Parameters if missing."""
+        if self.has_deltas():
+            return
+        dw, ln, pw1, _, pw2, ls = self._shared
+        z = lambda t: nn.Parameter(torch.zeros_like(t))
+        self.dwWDelta,  self.dwBDelta  = z(dw.weight),  z(dw.bias)
+        self.lnWDelta,  self.lnBDelta  = z(ln.weight),  z(ln.bias)
+        self.pw1WDelta, self.pw1BDelta = z(pw1.weight), z(pw1.bias)
+        self.pw2WDelta, self.pw2BDelta = z(pw2.weight), z(pw2.bias)
+        self.lsDelta                   = z(ls.gamma)
+
     def deltas(self):
         """(name, delta) for each part of the block, named as in sharedWeights()."""
+        if not self.has_deltas():
+            return []
         return [(name, getattr(self, attr)) for name, attr in self.DELTA_ATTRS.items()]
+
+    @torch.no_grad()
+    def delete_deltas(self):
+        """Drop delta Parameters to free GPU memory in shared-only mode."""
+        if not self.has_deltas():
+            self.useDeltas = False
+            return
+        for attr in self.DELTA_ATTRS.values():
+            if attr in self._parameters:
+                del self._parameters[attr]
+            if hasattr(self, attr):
+                object.__delattr__(self, attr)
+        self.useDeltas = False
 
     @torch.no_grad()
     def setDeltas(self, deltas: dict[str, torch.Tensor]):
         """Overwrite the given deltas in place, keyed as in deltas()."""
+        if not self.has_deltas():
+            self.init_deltas()
         for key, delta in deltas.items():
             attr = self.DELTA_ATTRS.get(key)
             if attr is None:
@@ -71,7 +104,17 @@ class DeltaConvnextBlock(nn.Module):
         self.setSharedBlockWeights(self._shared, sharedWeights)
 
     def setUseDeltas(self, useDeltas: bool):
+        """Toggle whether forward adds deltas. Does not allocate or delete them."""
+        if useDeltas and not self.has_deltas():
+            self.init_deltas()
         self.useDeltas = useDeltas
+        for _, delta in self.deltas():
+            delta.requires_grad_(useDeltas)
+
+    def freeze_deltas(self):
+        """Keep delta params but stop training them (needed for DDP when useDeltas=False)."""
+        for _, delta in self.deltas():
+            delta.requires_grad_(False)
 
     @staticmethod
     def sharedWeights(sharedBlock):
@@ -99,6 +142,8 @@ class DeltaConvnextBlock(nn.Module):
         """
         Reparametrize substracting the mean_delta from the original weight.
         """
+        if not self.has_deltas():
+            return
         for name, delta in self.deltas():
             n_meanDelta = mean_deltas[name]
             self.setDeltas({name: delta - n_meanDelta})
@@ -107,7 +152,7 @@ class DeltaConvnextBlock(nn.Module):
         dw, ln, pw1, _, pw2, ls = self._shared
         weights = dw.weight
         biases = dw.bias
-        if self.useDeltas:
+        if self.useDeltas and self.has_deltas():
             weights = weights + self.dwWDelta
             biases = biases + self.dwBDelta
         h = F.conv2d(x, weights, biases, padding=dw.padding, groups=dw.groups)
@@ -116,7 +161,7 @@ class DeltaConvnextBlock(nn.Module):
 
         weights = ln.weight
         biases = ln.bias
-        if self.useDeltas:
+        if self.useDeltas and self.has_deltas():
             weights = weights + self.lnWDelta
             biases = biases + self.lnBDelta
         h = F.layer_norm(h, ln.normalized_shape, weights, biases, ln.eps)
@@ -124,7 +169,7 @@ class DeltaConvnextBlock(nn.Module):
 
         weights = pw1.weight
         biases = pw1.bias
-        if self.useDeltas:
+        if self.useDeltas and self.has_deltas():
             weights = weights + self.pw1WDelta
             biases = biases + self.pw1BDelta
         h = F.conv2d(h, weights, biases)
@@ -133,13 +178,13 @@ class DeltaConvnextBlock(nn.Module):
 
         weights = pw2.weight
         biases = pw2.bias
-        if self.useDeltas:
+        if self.useDeltas and self.has_deltas():
             weights = weights + self.pw2WDelta
             biases = biases + self.pw2BDelta
         h = F.conv2d(h, weights, biases)
 
         gamma = ls.gamma
-        if self.useDeltas:
+        if self.useDeltas and self.has_deltas():
             gamma = gamma + self.lsDelta
         h = h * gamma.view(1, -1, 1, 1)
         return x + self.stochasticDepth(h)

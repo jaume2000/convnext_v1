@@ -38,6 +38,56 @@ def test_reparametrize_centers_deltas_and_updates_shared():
             )
 
 
+def test_shared_only_has_no_delta_params():
+    model = DeltaConvNext(useDeltas=False)
+    model.rewire()
+    delta_params = [n for n, _ in model.named_parameters() if "Delta" in n]
+    assert delta_params == []
+
+    model = DeltaConvNext(useDeltas=True)
+    model.rewire()
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 81
+    model.delete_deltas()
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 0
+
+
+def test_init_deltas_recreates_zero_params():
+    model = DeltaConvNext(useDeltas=False)
+    model.rewire()
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 0
+
+    model.init_deltas()
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 81
+    for block in model.deltifiedStage3:
+        if isinstance(block, DeltaConvnextBlock):
+            for _, delta in block.deltas():
+                assert torch.all(delta == 0)
+
+
+def test_set_use_deltas_does_not_delete():
+    """useDeltas=False toggles forward only; params stay allocated."""
+    model = DeltaConvNext(useDeltas=True)
+    model.rewire()
+    block = model.deltifiedStage3[0]
+    assert isinstance(block, DeltaConvnextBlock)
+    block.setDeltas({name: torch.full_like(d, 1.0) for name, d in block.deltas()})
+
+    model.setUseDeltas(False)
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 81
+    assert all(not p.requires_grad for n, p in model.named_parameters() if "Delta" in n)
+    assert torch.all(block.dwWDelta == 1.0)
+
+    model.setUseDeltas(True)
+    assert all(p.requires_grad for n, p in model.named_parameters() if "Delta" in n)
+
+
+def test_set_use_deltas_generates_missing_deltas():
+    model = DeltaConvNext(useDeltas=False)
+    model.rewire()
+    model.setUseDeltas(True)
+    assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 81
+
+
 def test_reparametrize_preserves_effective_weights():
     """shared + delta must be unchanged by reparametrization."""
     stage3_length = 9

@@ -24,6 +24,7 @@ import torch
 
 EXPERIMENT_NAME = "shared_convnextv1_imagenet"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
+USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
 EPOCHS = 300
 WARMUP_EPOCHS = 10
@@ -66,9 +67,12 @@ else:
     device = torch.device("cpu")
     use_ddp = False
 
-model = DeltaConvNext(useDeltas=False)
+model = DeltaConvNext(useDeltas=USE_DELTAS)
 model.rewire()
 model = model.to(device)
+if rank == 0 and not USE_DELTAS:
+    n_delta = sum(1 for n, _ in model.named_parameters() if "Delta" in n)
+    print(f"Shared-only mode: {n_delta} delta params on GPU")
 if use_ddp:
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     if rank == 0:
@@ -109,11 +113,14 @@ val_loader = DataLoader(
 
 param_groups = build_param_groups_with_delta_weight_decay(model, weight_decay=WEIGHT_DECAY, delta_weight_decay=DELTA_WEIGHT_DECAY)
 if rank == 0:
-    print(
-        f"Weight decay {WEIGHT_DECAY} on {sum(p.numel() for p in param_groups[0]['params'])} params, "
-        f"delta weight decay {DELTA_WEIGHT_DECAY} on {sum(p.numel() for p in param_groups[1]['params'])} params, "
-        f"none on {sum(p.numel() for p in param_groups[2]['params'])} (norms, biases, layer scale)"
-    )
+    msg = f"Weight decay {WEIGHT_DECAY} on {sum(p.numel() for p in param_groups[0]['params'])} params"
+    delta_groups = [g for g in param_groups if g["weight_decay"] == DELTA_WEIGHT_DECAY]
+    if delta_groups:
+        msg += f", delta weight decay {DELTA_WEIGHT_DECAY} on {sum(p.numel() for g in delta_groups for p in g['params'])} params"
+    no_wd = [g for g in param_groups if g["weight_decay"] == 0.0]
+    if no_wd:
+        msg += f", none on {sum(p.numel() for g in no_wd for p in g['params'])} (norms, biases, layer scale)"
+    print(msg)
 optimizer = AdamW(param_groups, lr=LR, betas=(0.9, 0.999))
 steps_per_epoch = len(train_loader)
 scheduler = CosineWithWarmup(

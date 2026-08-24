@@ -18,18 +18,19 @@ def build_param_groups_with_delta_weight_decay(
         else:
             (base if param.ndim >= 2 else none).append(param)
 
-    assert delta, "No delta params found — ¿corriste rewire() antes de construir los grupos?"
-    n_blocks = 9
-    # 6 por bloque: dw, pw1 y pw2, weight y bias. Los deltas de ln y ls van a delta_norm.
-    per_block = 6
-    assert len(delta) == per_block * n_blocks, f"Esperaba {per_block*n_blocks} deltas de conv, hay {len(delta)}"
+    if delta:
+        n_blocks = 9
+        # 6 por bloque: dw, pw1 y pw2, weight y bias. Los deltas de ln y ls van a delta_norm.
+        per_block = 6
+        assert len(delta) == per_block * n_blocks, f"Esperaba {per_block*n_blocks} deltas de conv, hay {len(delta)}"
 
-    return [
-        {"params": base,       "weight_decay": weight_decay},
-        {"params": delta,      "weight_decay": delta_weight_decay},
-        {"params": delta_norm, "weight_decay": delta_norm_weight_decay},
-        {"params": none,       "weight_decay": 0.0},
-    ]
+    groups = [{"params": base, "weight_decay": weight_decay}]
+    if delta:
+        groups.append({"params": delta, "weight_decay": delta_weight_decay})
+    if delta_norm:
+        groups.append({"params": delta_norm, "weight_decay": delta_norm_weight_decay})
+    groups.append({"params": none, "weight_decay": 0.0})
+    return groups
 
 def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     """Split parameters into a decayed and a non-decayed group.

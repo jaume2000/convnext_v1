@@ -11,10 +11,39 @@ class DeltaConvNext(ConvNextV1):
         self.useDeltas = useDeltas
 
     def setUseDeltas(self, useDeltas: bool):
+        """Toggle whether blocks add deltas in forward. Does not delete them."""
         self.useDeltas = useDeltas
         for i in range(self.stage3_length):
-            for key, delta in self.deltifiedStage3[i].deltas():
-                self.deltifiedStage3[i].setUseDeltas(useDeltas)
+            block = self.deltifiedStage3[i]
+            if isinstance(block, DeltaConvnextBlock):
+                block.setUseDeltas(useDeltas)
+
+    def init_deltas(self):
+        """Allocate zero delta Parameters on every block that lacks them."""
+        for block in self.deltifiedStage3:
+            if isinstance(block, DeltaConvnextBlock):
+                block.init_deltas()
+        if self.useDeltas:
+            self.unfreeze_deltas()
+
+    def delete_deltas(self):
+        """Remove delta Parameters from every block; shared-only mode."""
+        for block in self.deltifiedStage3:
+            if isinstance(block, DeltaConvnextBlock):
+                block.delete_deltas()
+        self.useDeltas = False
+
+    def freeze_deltas(self):
+        """Keep delta params but stop training them."""
+        for block in self.deltifiedStage3:
+            if isinstance(block, DeltaConvnextBlock):
+                block.freeze_deltas()
+
+    def unfreeze_deltas(self):
+        for block in self.deltifiedStage3:
+            if isinstance(block, DeltaConvnextBlock):
+                for _, delta in block.deltas():
+                    delta.requires_grad_(True)
 
     def rewire(self, sharedBlock: int = 5):
         stage3_offset = self.accum_depths[2]
@@ -33,7 +62,8 @@ class DeltaConvNext(ConvNextV1):
         tail = self.stage3[self.depths[2]:]
         self.deltifiedStage3 = nn.Sequential(*deltablocks, *tail)
         del self.stage3
-        print(f"Rewired: stage3 -> 1 shared block + {self.stage3_length} deltas + {len(tail)} tail layers")
+        mode = "shared-only (no delta params)" if not self.useDeltas else f"{self.stage3_length} delta blocks"
+        print(f"Rewired: stage3 -> 1 shared block + {mode} + {len(tail)} tail layers")
 
     def getSharedWeights(self):
         return DeltaConvnextBlock.sharedWeights(self.sharedBlock)
@@ -88,6 +118,9 @@ class DeltaConvNext(ConvNextV1):
 
     @torch.no_grad()
     def reparametrize(self):
+        blocks = [b for b in self.deltifiedStage3 if isinstance(b, DeltaConvnextBlock) and b.has_deltas()]
+        if not blocks:
+            return
         mean_deltas = self._getMeanDeltas()
         self._reparametrize_shared(mean_deltas)
         self._reparametrize_deltas(mean_deltas)

@@ -197,8 +197,8 @@ class Trainer():
             if self.gradient_clipping is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
             self.optimizer.step()
-            if hasattr(self.model, "reparametrize"):
-                self.model.reparametrize()
+            if hasattr(model, "reparametrize"):
+                model.reparametrize()
             if self.scheduler is not None and not self.scheduler_per_epoch:
                 self.scheduler.step()
             if not main:
