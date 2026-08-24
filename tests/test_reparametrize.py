@@ -88,6 +88,12 @@ def test_set_use_deltas_generates_missing_deltas():
     assert sum(1 for n, _ in model.named_parameters() if "Delta" in n) == 81
 
 
+def test_delta_ratios_empty_in_shared_only_mode():
+    model = DeltaConvNext(useDeltas=False)
+    model.rewire()
+    assert model.delta_ratios() == {}
+
+
 def test_reparametrize_preserves_effective_weights():
     """shared + delta must be unchanged by reparametrization."""
     stage3_length = 9

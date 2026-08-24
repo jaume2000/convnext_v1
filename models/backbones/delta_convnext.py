@@ -82,7 +82,10 @@ class DeltaConvNext(ConvNextV1):
         mean 45 device syncs inside the training step.
         """
         # The tail (LayerNorm2d + downsampling conv) shares the Sequential but has no deltas.
-        blocks = [b for b in self.deltifiedStage3 if isinstance(b, DeltaConvnextBlock)]
+        blocks = [
+            b for b in self.deltifiedStage3
+            if isinstance(b, DeltaConvnextBlock) and b.has_deltas()
+        ]
         if not blocks:
             return {}
         weight_norms = {
@@ -94,6 +97,8 @@ class DeltaConvNext(ConvNextV1):
             for name, delta in block.deltas():
                 names.append(f"b{i}/{name}")
                 ratios.append(delta.norm() / weight_norms[name])
+        if not ratios:
+            return {}
         return dict(zip(names, torch.stack(ratios).float().tolist()))
 
     @torch.no_grad()
