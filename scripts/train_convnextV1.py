@@ -15,10 +15,12 @@ from torch.optim import AdamW
 from optim.cosineSchedule import CosineWithWarmup
 from optim.paramGroups import build_param_groups
 from timm.loss import SoftTargetCrossEntropy
+from utils.env import experiment_name, load_dotenv
 import torch
 import torch.nn as nn
 
-EXPERIMENT_NAME = "convnextv1_imagenet"
+load_dotenv()
+EXPERIMENT_NAME = experiment_name("convnextv1_imagenet")
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 EPOCHS = 300
 WARMUP_EPOCHS = 20

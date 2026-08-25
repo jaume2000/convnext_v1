@@ -19,10 +19,12 @@ from models.backbones.delta_convnext import DeltaConvNext
 from optim.cosineSchedule import CosineWithWarmup
 from optim.paramGroups import build_param_groups_with_delta_weight_decay
 from timm.loss import SoftTargetCrossEntropy
+from utils.env import experiment_name, load_dotenv
 import torch
 
 
-EXPERIMENT_NAME = "shared_convnextv1_imagenet"
+load_dotenv()
+EXPERIMENT_NAME = experiment_name("shared_convnextv1_imagenet")
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True

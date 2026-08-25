@@ -16,10 +16,12 @@ from models.backbones.delta_convnext import DeltaConvNext
 from optim.cosineSchedule import CosineWithWarmup
 from optim.paramGroups import build_param_groups, build_param_groups_with_delta_weight_decay
 from timm.loss import SoftTargetCrossEntropy
+from utils.env import experiment_name, load_dotenv
 import torch
 import torch.nn as nn
 
-EXPERIMENT_NAME = "delta_convnextv1_imagenet"
+load_dotenv()
+EXPERIMENT_NAME = experiment_name("delta_convnextv1_imagenet")
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DATA_PARALLEL = False
 EPOCHS = 100

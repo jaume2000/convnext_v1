@@ -89,12 +89,14 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
 fi
 
 BASELINE_WEIGHTS="${BASELINE_WEIGHTS:-${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth}"
-DELTA_EXPERIMENT="${DELTA_EXPERIMENT:-${PROJECT_ROOT}/outputs/delta_convnextv1_imagenet}"
+# From .env (or override): EXPERIMENT_NAME=delta_convnextv1_imagenet
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-delta_convnextv1_imagenet}"
+EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 RETAKE="${RETAKE:-0}"
 
 if [[ "${RETAKE}" == "1" ]]; then
-  if [[ ! -f "${DELTA_EXPERIMENT}/weights/last.pth" ]]; then
-    echo "RETAKE=1 but delta checkpoint not found at ${DELTA_EXPERIMENT}/weights/last.pth" >&2
+  if [[ ! -f "${EXPERIMENT}/weights/last.pth" ]]; then
+    echo "RETAKE=1 but checkpoint not found at ${EXPERIMENT}/weights/last.pth" >&2
     exit 1
   fi
 else
@@ -138,12 +140,14 @@ echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "RETAKE: ${RETAKE}"
 echo "Train script: ${TRAIN_SCRIPT}"
 echo "Baseline weights: ${BASELINE_WEIGHTS}"
-echo "Delta experiment: ${DELTA_EXPERIMENT}"
+echo "EXPERIMENT_NAME: ${EXPERIMENT_NAME}"
+echo "Experiment path: ${EXPERIMENT}"
 echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
 export RETAKE
 export BASELINE_WEIGHTS
+export EXPERIMENT_NAME
 srun python "${TRAIN_SCRIPT}" ${TRAIN_ARGS:-}
 
 echo "End: $(date)"

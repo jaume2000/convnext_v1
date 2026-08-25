@@ -90,13 +90,15 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   exit 1
 fi
 
-DELTA_EXPERIMENT="${DELTA_EXPERIMENT:-${PROJECT_ROOT}/outputs/delta_convnextv1_imagenet}"
+# From .env (or override): EXPERIMENT_NAME=shared_convnextv1_imagenet
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-shared_convnextv1_imagenet}"
+EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 RETAKE="${RETAKE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 if [[ "${RETAKE}" == "1" ]]; then
-  if [[ ! -f "${DELTA_EXPERIMENT}/weights/last.pth" ]]; then
-    echo "RETAKE=1 but delta checkpoint not found at ${DELTA_EXPERIMENT}/weights/last.pth" >&2
+  if [[ ! -f "${EXPERIMENT}/weights/last.pth" ]]; then
+    echo "RETAKE=1 but checkpoint not found at ${EXPERIMENT}/weights/last.pth" >&2
     exit 1
   fi
 fi
@@ -133,12 +135,14 @@ echo "Account: ${SLURM_ACCOUNT:-unset}"
 echo "GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "RETAKE: ${RETAKE}"
 echo "Train script: ${TRAIN_SCRIPT}"
-echo "Delta experiment: ${DELTA_EXPERIMENT}"
+echo "EXPERIMENT_NAME: ${EXPERIMENT_NAME}"
+echo "Experiment path: ${EXPERIMENT}"
 echo "nproc_per_node: ${NPROC_PER_NODE}"
 echo "Start: $(date)"
 python -c "import torch, torchvision, timm; print(f'torch={torch.__version__} ({torch.__file__})'); print(f'torchvision={torchvision.__version__} ({torchvision.__file__})'); print(f'timm={timm.__version__} ({timm.__file__})')"
 
 export RETAKE
+export EXPERIMENT_NAME
 # DDP needs torchrun so each rank gets LOCAL_RANK / RANK / WORLD_SIZE.
 # Do not launch with bare `python`: that keeps a single process on one GPU.
 torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" "${TRAIN_SCRIPT}" ${TRAIN_ARGS:-}
