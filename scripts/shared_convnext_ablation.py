@@ -25,8 +25,8 @@ EXPERIMENT_NAME = "sharedConvnextAblation"
 CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
 OUTPUT_DIR = Path("outputs") / EXPERIMENT_NAME
 
-BATCH_SIZE = 4096
-NUM_WORKERS = 32
+BATCH_SIZE = 1024
+NUM_WORKERS = 16
 MAX_BATCHES: int | None = None  # set e.g. 2 for a quick smoke test
 AMP = False
 RESUME = False
@@ -402,6 +402,8 @@ def main() -> None:
         print(name)
         row = runner.evaluate_configuration(configuration)
         append_result(csv_path, row_to_record(name, row))
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     if csv_path.is_file():
         df = pd.read_csv(csv_path)
