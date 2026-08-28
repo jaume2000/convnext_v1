@@ -84,13 +84,17 @@ EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 CHECKPOINT="${CHECKPOINT:-${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth}"
 RESUME="${RESUME:-0}"
 MAX_BATCHES="${MAX_BATCHES:-}"
+BATCH_SIZE="${BATCH_SIZE:-96}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+# Staging copies ImageNet into RAM (/dev/shm); skip for this CPU-heavy sweep.
+STAGE_DATA="${STAGE_DATA:-0}"
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
   echo "Checkpoint not found at ${CHECKPOINT}" >&2
   exit 1
 fi
 
-if [[ "${STAGE_DATA:-1}" == "1" ]]; then
+if [[ "${STAGE_DATA}" == "1" ]]; then
   STAGE_ROOT="/dev/shm/hfstage_${SLURM_JOB_ID}"
   needed_kb="$(du -sk "${HF_DATASETS_CACHE}/${DATASET_DIR}" | cut -f1)"
   avail_kb="$(df --output=avail -k /dev/shm | tail -1)"
@@ -114,6 +118,8 @@ fi
 SCRIPT_ARGS=(
   --checkpoint "${CHECKPOINT}"
   --output-dir "${EXPERIMENT}"
+  --batch-size "${BATCH_SIZE}"
+  --num-workers "${NUM_WORKERS}"
 )
 if [[ "${RESUME}" == "1" ]]; then
   SCRIPT_ARGS+=(--resume)
@@ -128,6 +134,9 @@ echo "Python: $(which python)"
 echo "HF cache: ${HF_DATASETS_CACHE}"
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Experiment path: ${EXPERIMENT}"
+echo "Batch size: ${BATCH_SIZE}"
+echo "Num workers: ${NUM_WORKERS}"
+echo "Stage data: ${STAGE_DATA}"
 echo "Resume: ${RESUME}"
 echo "Start: $(date)"
 

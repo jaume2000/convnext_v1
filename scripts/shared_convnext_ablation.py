@@ -164,6 +164,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=int(os.environ.get("NUM_WORKERS", "4")),
+        help="DataLoader workers (lower if SLURM CPU OOM)",
+    )
+    parser.add_argument(
         "--max-batches",
         type=int,
         default=None,
@@ -199,10 +205,12 @@ class AblationRunner:
         max_batches: int | None,
         amp: bool,
         n_blocks: int,
+        num_workers: int,
     ) -> None:
         from data.imagenet import ImageNetDataset
         from data.transforms.transforms import build_val_transforms
         from timm.loss import SoftTargetCrossEntropy
+        from torch.utils.data import DataLoader
 
         self.model = model
         self.device = device
@@ -211,20 +219,17 @@ class AblationRunner:
         self.amp = amp
         self.n_blocks = n_blocks
         self.criterion = SoftTargetCrossEntropy()
-        self.num_workers = max(1, available_cpus() // 2)
+        self.num_workers = max(0, num_workers)
         self.val_dataset = ImageNetDataset(split="validation", transforms=build_val_transforms())
-        print(f"Dataloader workers: {self.num_workers}")
-
-    def _make_val_loader(self):
-        from torch.utils.data import DataLoader
-
-        return DataLoader(
+        self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.device.type == "cuda",
+            persistent_workers=self.num_workers > 0,
         )
+        print(f"Dataloader workers: {self.num_workers}")
 
     @staticmethod
     def _to_device(batch: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -248,41 +253,35 @@ class AblationRunner:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        loader = self._make_val_loader()
         desc = f"cfg={block_indices} h={euler_step} m={method or 'RK1'}"
-        pbar = tqdm(loader, desc=desc, leave=False)
-        try:
-            for step, (batch, y_labels) in enumerate(pbar):
-                if self.max_batches is not None and step >= self.max_batches:
-                    break
-                batch = self._to_device(batch, self.device)
-                y_labels = y_labels.to(self.device, non_blocking=True)
-                soft_labels = torch.nn.functional.one_hot(
-                    y_labels, num_classes=NUM_CLASSES
-                ).float()
+        pbar = tqdm(self.val_loader, desc=desc, leave=False)
+        for step, (batch, y_labels) in enumerate(pbar):
+            if self.max_batches is not None and step >= self.max_batches:
+                break
+            batch = self._to_device(batch, self.device)
+            y_labels = y_labels.to(self.device, non_blocking=True)
+            soft_labels = torch.nn.functional.one_hot(
+                y_labels, num_classes=NUM_CLASSES
+            ).float()
 
-                with torch.autocast(
-                    "cuda",
-                    enabled=self.amp and self.device.type == "cuda",
-                    dtype=torch.bfloat16,
-                ):
-                    pred = self.model.custom_forward(batch, configuration)
-                    loss = self.criterion(pred, soft_labels)
+            with torch.autocast(
+                "cuda",
+                enabled=self.amp and self.device.type == "cuda",
+                dtype=torch.bfloat16,
+            ):
+                pred = self.model.custom_forward(batch, configuration)
+                loss = self.criterion(pred, soft_labels)
 
-                bs = pred.shape[0]
-                total_samples += bs
-                total_correct += (pred.argmax(1) == y_labels).sum().item()
-                total_loss += loss.item() * bs
-                n_steps += 1
-                pbar.set_postfix(
-                    acc=f"{total_correct / total_samples:.3f}",
-                    loss=f"{total_loss / total_samples:.3f}",
-                )
-        finally:
-            pbar.close()
-            if getattr(loader, "_iterator", None) is not None:
-                loader._iterator._shutdown_workers()
-                loader._iterator = None
+            bs = pred.shape[0]
+            total_samples += bs
+            total_correct += (pred.argmax(1) == y_labels).sum().item()
+            total_loss += loss.item() * bs
+            n_steps += 1
+            pbar.set_postfix(
+                acc=f"{total_correct / total_samples:.3f}",
+                loss=f"{total_loss / total_samples:.3f}",
+            )
+        pbar.close()
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -404,6 +403,7 @@ def main() -> None:
         max_batches=args.max_batches,
         amp=args.amp,
         n_blocks=n_blocks,
+        num_workers=args.num_workers,
     )
 
     for name, configuration in configurations:
