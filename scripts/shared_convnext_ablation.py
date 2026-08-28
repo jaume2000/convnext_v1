@@ -1,3 +1,17 @@
+# --- Experiment config (edit here) ---
+EXPERIMENT_NAME = "sharedConvnextAblation"
+CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
+OUTPUT_DIR = Path("outputs") / EXPERIMENT_NAME
+
+BATCH_SIZE = 4096
+NUM_WORKERS = 32
+MAX_BATCHES: int | None = None  # set e.g. 2 for a quick smoke test
+AMP = False
+RESUME = False
+NUM_CLASSES = 1000
+
+
+
 """Shared ConvNeXt custom_forward configuration sweep on ImageNet validation."""
 
 from __future__ import annotations
@@ -18,12 +32,8 @@ import torch
 from tqdm import tqdm
 
 from models.backbones.delta_convnext import CustomForwardConfig, DeltaConvNext
-from utils.env import experiment_name, load_dotenv
+from utils.env import load_dotenv
 
-DEFAULT_CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
-DEFAULT_OUTPUT_DIR = Path("outputs") / "sharedConvnextAblation"
-BATCH_SIZE = 4096
-NUM_CLASSES = 1000
 
 
 def available_cpus() -> int:
@@ -148,39 +158,7 @@ def build_configurations(
 
 
 def parse_args() -> argparse.Namespace:
-    load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=Path(os.environ.get("CHECKPOINT", DEFAULT_CHECKPOINT)),
-        help="Shared ConvNeXt checkpoint (.pth)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("outputs") / experiment_name("sharedConvnextAblation"),
-        help="Experiment directory for results.csv",
-    )
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=int(os.environ.get("NUM_WORKERS", "4")),
-        help="DataLoader workers (lower if SLURM CPU OOM)",
-    )
-    parser.add_argument(
-        "--max-batches",
-        type=int,
-        default=None,
-        help="Limit val batches per configuration (smoke test)",
-    )
-    parser.add_argument("--amp", action="store_true", help="Use bf16 autocast on CUDA")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Skip configurations already present in results.csv",
-    )
     parser.add_argument(
         "--list-only",
         action="store_true",
@@ -354,8 +332,9 @@ def append_result(csv_path: Path, record: dict) -> None:
 
 
 def main() -> None:
+    load_dotenv()
     args = parse_args()
-    output_dir = args.output_dir
+    output_dir = OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "results.csv"
 
@@ -377,9 +356,19 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device}")
+    print(f"experiment={EXPERIMENT_NAME}")
     print(f"output_dir={output_dir.resolve()}")
+    print(f"checkpoint={CHECKPOINT.resolve()}")
+    print(f"batch_size={BATCH_SIZE}")
+    print(f"num_workers={NUM_WORKERS}")
+    print(f"max_batches={MAX_BATCHES}")
+    print(f"amp={AMP}")
+    print(f"resume={RESUME}")
 
-    model = load_shared_convnext(args.checkpoint)
+    if not CHECKPOINT.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT}")
+
+    model = load_shared_convnext(CHECKPOINT)
     model = model.to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
@@ -392,18 +381,18 @@ def main() -> None:
 
     configurations = build_configurations(n_blocks, tail)
 
-    completed = load_completed_names(csv_path) if args.resume else set()
+    completed = load_completed_names(csv_path) if RESUME else set()
     if completed:
         print(f"Resuming: {len(completed)} configurations already in {csv_path}")
 
     runner = AblationRunner(
         model,
         device=device,
-        batch_size=args.batch_size,
-        max_batches=args.max_batches,
-        amp=args.amp,
+        batch_size=BATCH_SIZE,
+        max_batches=MAX_BATCHES,
+        amp=AMP,
         n_blocks=n_blocks,
-        num_workers=args.num_workers,
+        num_workers=NUM_WORKERS,
     )
 
     for name, configuration in configurations:
