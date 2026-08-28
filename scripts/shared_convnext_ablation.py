@@ -66,6 +66,10 @@ def cfg(
     return out
 
 
+def shared_block_count(block_indices: list[int]) -> int:
+    return len(block_indices) - 2
+
+
 def build_configurations(
     n_blocks: int,
     tail: list[int],
@@ -74,63 +78,97 @@ def build_configurations(
         ("-----------------", None),
         ("baseline (forward)", cfg(tail, list(range(n_blocks)))),
         ("D=1, ES=1", cfg(tail, [0] * 1)),
+        ("D=2, ES=1", cfg(tail, [0] * 2)),
         ("D=3, ES=1", cfg(tail, [0] * 3)),
+        ("D=4, ES=1", cfg(tail, [0] * 4)),
         ("D=5, ES=1", cfg(tail, [0] * 5)),
+        ("D=6, ES=1", cfg(tail, [0] * 6)),
         ("D=7, ES=1", cfg(tail, [0] * 7)),
+        ("D=8, ES=1", cfg(tail, [0] * 8)),
         ("D=9, ES=1", cfg(tail, [0] * 9)),
+        ("D=10, ES=1", cfg(tail, [0] * 10)),
+        ("D=11, ES=1", cfg(tail, [0] * 11)),
         ("D=12, ES=1", cfg(tail, [0] * 12)),
         ("D=18, ES=1", cfg(tail, [0] * 18)),
         ("D=24, ES=1", cfg(tail, [0] * 24)),
-        ("D=30, ES=1", cfg(tail, [0] * 30)),
-        ("D=36, ES=1", cfg(tail, [0] * 36)),
-        ("D=42, ES=1", cfg(tail, [0] * 42)),
+        ("D=32, ES=1", cfg(tail, [0] * 32)),
         ("D=48, ES=1", cfg(tail, [0] * 48)),
-        ("D=54, ES=1", cfg(tail, [0] * 54)),
-        ("D=60, ES=1", cfg(tail, [0] * 60)),
+        ("D=64, ES=1", cfg(tail, [0] * 64)),
+        ("D=96, ES=1", cfg(tail, [0] * 96)),
+        ("D=128, ES=1", cfg(tail, [0] * 128)),
+        ("D=256, ES=1", cfg(tail, [0] * 256)),
+        ("D=512, ES=1", cfg(tail, [0] * 512)),
+        ("D=1024, ES=1", cfg(tail, [0] * 1024)),
         ("-----------------", None),
         ("D=1, ES=9/1", cfg(tail, [0] * 1, euler_step=9 / 1)),
+        ("D=2, ES=9/2", cfg(tail, [0] * 2, euler_step=9 / 2)),
         ("D=3, ES=9/3", cfg(tail, [0] * 3, euler_step=9 / 3)),
+        ("D=4, ES=9/4", cfg(tail, [0] * 4, euler_step=9 / 4)),
         ("D=5, ES=9/5", cfg(tail, [0] * 5, euler_step=9 / 5)),
+        ("D=6, ES=9/6", cfg(tail, [0] * 6, euler_step=9 / 6)),
         ("D=7, ES=9/7", cfg(tail, [0] * 7, euler_step=9 / 7)),
+        ("D=8, ES=9/8", cfg(tail, [0] * 8, euler_step=9 / 8)),
         ("D=9, ES=9/9", cfg(tail, [0] * 9, euler_step=9 / 9)),
+        ("D=10, ES=9/10", cfg(tail, [0] * 10, euler_step=9 / 10)),
+        ("D=11, ES=9/11", cfg(tail, [0] * 11, euler_step=9 / 11)),
         ("D=12, ES=9/12", cfg(tail, [0] * 12, euler_step=9 / 12)),
         ("D=18, ES=9/18", cfg(tail, [0] * 18, euler_step=9 / 18)),
         ("D=24, ES=9/24", cfg(tail, [0] * 24, euler_step=9 / 24)),
-        ("D=30, ES=9/30", cfg(tail, [0] * 30, euler_step=9 / 30)),
-        ("D=36, ES=9/40", cfg(tail, [0] * 36, euler_step=9 / 40)),
-        ("D=42, ES=9/60", cfg(tail, [0] * 42, euler_step=9 / 60)),
-        ("D=48, ES=9/100", cfg(tail, [0] * 48, euler_step=9 / 100)),
-        ("D=48, ES=9/200", cfg(tail, [0] * 48, euler_step=9 / 200)),
-        ("D=48, ES=9/1000", cfg(tail, [0] * 48, euler_step=9 / 1000)),
-        ("D=48, ES=9/10000", cfg(tail, [0] * 48, euler_step=9 / 1000)),
+        ("D=32, ES=9/32", cfg(tail, [0] * 32, euler_step=9 / 32)),
+        ("D=48, ES=9/48", cfg(tail, [0] * 48, euler_step=9 / 48)),
+        ("D=64, ES=9/64", cfg(tail, [0] * 64, euler_step=9 / 64)),
+        ("D=96, ES=9/96", cfg(tail, [0] * 96, euler_step=9 / 96)),
+        ("D=128, ES=9/128", cfg(tail, [0] * 128, euler_step=9 / 128)),
+        ("D=256, ES=9/256", cfg(tail, [0] * 256, euler_step=9 / 256)),
+        ("D=512, ES=9/512", cfg(tail, [0] * 512, euler_step=9 / 512)),
+        ("D=1024, ES=9/1024", cfg(tail, [0] * 1024, euler_step=9 / 1024)),
         ("-----------------", None),
         ("D=1, ES=9/1", cfg(tail, [0] * 1, euler_step=9 / 1, method="RK2")),
+        ("D=2, ES=9/2", cfg(tail, [0] * 2, euler_step=9 / 2, method="RK2")),
         ("D=3, ES=9/3", cfg(tail, [0] * 3, euler_step=9 / 3, method="RK2")),
+        ("D=4, ES=9/4", cfg(tail, [0] * 4, euler_step=9 / 4, method="RK2")),
         ("D=5, ES=9/5", cfg(tail, [0] * 5, euler_step=9 / 5, method="RK2")),
+        ("D=6, ES=9/6", cfg(tail, [0] * 6, euler_step=9 / 6, method="RK2")),
         ("D=7, ES=9/7", cfg(tail, [0] * 7, euler_step=9 / 7, method="RK2")),
+        ("D=8, ES=9/8", cfg(tail, [0] * 8, euler_step=9 / 8, method="RK2")),
         ("D=9, ES=9/9", cfg(tail, [0] * 9, euler_step=9 / 9, method="RK2")),
+        ("D=10, ES=9/10", cfg(tail, [0] * 10, euler_step=9 / 10, method="RK2")),
+        ("D=11, ES=9/11", cfg(tail, [0] * 11, euler_step=9 / 11, method="RK2")),
         ("D=12, ES=9/12", cfg(tail, [0] * 12, euler_step=9 / 12, method="RK2")),
         ("D=18, ES=9/18", cfg(tail, [0] * 18, euler_step=9 / 18, method="RK2")),
         ("D=24, ES=9/24", cfg(tail, [0] * 24, euler_step=9 / 24, method="RK2")),
-        ("D=30, ES=9/30", cfg(tail, [0] * 30, euler_step=9 / 30, method="RK2")),
-        ("D=36, ES=9/40", cfg(tail, [0] * 36, euler_step=9 / 40, method="RK2")),
-        ("D=42, ES=9/60", cfg(tail, [0] * 42, euler_step=9 / 60, method="RK2")),
-        ("D=48, ES=9/100", cfg(tail, [0] * 48, euler_step=9 / 100, method="RK2")),
-        ("D=48, ES=9/200", cfg(tail, [0] * 48, euler_step=9 / 200, method="RK2")),
+        ("D=32, ES=9/32", cfg(tail, [0] * 32, euler_step=9 / 32, method="RK2")),
+        ("D=48, ES=9/48", cfg(tail, [0] * 48, euler_step=9 / 48, method="RK2")),
+        ("D=64, ES=9/64", cfg(tail, [0] * 64, euler_step=9 / 64, method="RK2")),
+        ("D=96, ES=9/96", cfg(tail, [0] * 96, euler_step=9 / 96, method="RK2")),
+        ("D=128, ES=9/128", cfg(tail, [0] * 128, euler_step=9 / 128, method="RK2")),
+        ("D=256, ES=9/256", cfg(tail, [0] * 256, euler_step=9 / 256, method="RK2")),
+        ("D=512, ES=9/512", cfg(tail, [0] * 512, euler_step=9 / 512, method="RK2")),
+        ("D=1024, ES=9/1024", cfg(tail, [0] * 1024, euler_step=9 / 1024, method="RK2")),
+
         ("-----------------", None),
         ("D=1, ES=9/1", cfg(tail, [0] * 1, euler_step=9 / 1, method="RK4")),
+        ("D=2, ES=9/2", cfg(tail, [0] * 2, euler_step=9 / 2, method="RK4")),
         ("D=3, ES=9/3", cfg(tail, [0] * 3, euler_step=9 / 3, method="RK4")),
+        ("D=4, ES=9/4", cfg(tail, [0] * 4, euler_step=9 / 4, method="RK4")),
         ("D=5, ES=9/5", cfg(tail, [0] * 5, euler_step=9 / 5, method="RK4")),
+        ("D=6, ES=9/6", cfg(tail, [0] * 6, euler_step=9 / 6, method="RK4")),
         ("D=7, ES=9/7", cfg(tail, [0] * 7, euler_step=9 / 7, method="RK4")),
+        ("D=8, ES=9/8", cfg(tail, [0] * 8, euler_step=9 / 8, method="RK4")),
         ("D=9, ES=9/9", cfg(tail, [0] * 9, euler_step=9 / 9, method="RK4")),
+        ("D=10, ES=9/10", cfg(tail, [0] * 10, euler_step=9 / 10, method="RK4")),
+        ("D=11, ES=9/11", cfg(tail, [0] * 11, euler_step=9 / 11, method="RK4")),
         ("D=12, ES=9/12", cfg(tail, [0] * 12, euler_step=9 / 12, method="RK4")),
         ("D=18, ES=9/18", cfg(tail, [0] * 18, euler_step=9 / 18, method="RK4")),
         ("D=24, ES=9/24", cfg(tail, [0] * 24, euler_step=9 / 24, method="RK4")),
-        ("D=30, ES=9/30", cfg(tail, [0] * 30, euler_step=9 / 30, method="RK4")),
-        ("D=36, ES=9/40", cfg(tail, [0] * 36, euler_step=9 / 40, method="RK4")),
-        ("D=42, ES=9/60", cfg(tail, [0] * 42, euler_step=9 / 60, method="RK4")),
-        ("D=48, ES=9/100", cfg(tail, [0] * 48, euler_step=9 / 100, method="RK4")),
-        ("D=48, ES=9/200", cfg(tail, [0] * 48, euler_step=9 / 200, method="RK4")),
+        ("D=32, ES=9/32", cfg(tail, [0] * 32, euler_step=9 / 32, method="RK4")),
+        ("D=48, ES=9/48", cfg(tail, [0] * 48, euler_step=9 / 48, method="RK4")),
+        ("D=64, ES=9/64", cfg(tail, [0] * 64, euler_step=9 / 64, method="RK4")),
+        ("D=96, ES=9/96", cfg(tail, [0] * 96, euler_step=9 / 96, method="RK4")),
+        ("D=128, ES=9/128", cfg(tail, [0] * 128, euler_step=9 / 128, method="RK4")),
+        ("D=256, ES=9/256", cfg(tail, [0] * 256, euler_step=9 / 256, method="RK4")),
+        ("D=512, ES=9/512", cfg(tail, [0] * 512, euler_step=9 / 512, method="RK4")),
+        ("D=1024, ES=9/1024", cfg(tail, [0] * 1024, euler_step=9 / 1024, method="RK4")),
         ("-----------------", None),
         ("D=9, ES=0.01", cfg(tail, list(range(n_blocks)), euler_step=0.01)),
         ("D=9, ES=0.125", cfg(tail, list(range(n_blocks)), euler_step=0.125)),
@@ -141,6 +179,8 @@ def build_configurations(
         ("D=9, ES=8.0", cfg(tail, list(range(n_blocks)), euler_step=8.0)),
         ("D=9, ES=16.0", cfg(tail, list(range(n_blocks)), euler_step=16.0)),
         ("-----------------", None),
+
+        ("D=45, ES=9/2.5", cfg(tail, list(range(n_blocks)), euler_step=9 / 2.5)),
         ("D=45, ES=9/5", cfg(tail, list(range(n_blocks)), euler_step=9 / 5)),
         ("D=45, ES=9/11", cfg(tail, list(range(n_blocks)), euler_step=9 / 11)),
         ("D=45, ES=9/22.5", cfg(tail, list(range(n_blocks)), euler_step=9 / 22.5)),
@@ -149,8 +189,6 @@ def build_configurations(
         ("D=45, ES=9/180", cfg(tail, list(range(n_blocks)), euler_step=9 / 180)),
         ("D=45, ES=9/360", cfg(tail, list(range(n_blocks)), euler_step=9 / 360)),
         ("D=45, ES=9/720", cfg(tail, list(range(n_blocks)), euler_step=9 / 720)),
-        ("D=45, ES=9/1440", cfg(tail, list(range(n_blocks)), euler_step=9 / 1440)),
-        ("D=45, ES=9/2880", cfg(tail, list(range(n_blocks)), euler_step=9 / 2880)),
     ]
 
 
@@ -228,7 +266,10 @@ class AblationRunner:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-        desc = f"cfg={block_indices} h={euler_step} m={method or 'RK1'}"
+        desc = (
+            f"blocks={shared_block_count(block_indices)} "
+            f"h={euler_step} m={method or 'RK1'}"
+        )
         pbar = tqdm(self.val_loader, desc=desc, leave=False)
         for step, (batch, y_labels) in enumerate(pbar):
             if self.max_batches is not None and step >= self.max_batches:
@@ -347,7 +388,7 @@ def main() -> None:
             depth = len([i for i in configuration["block_indices"] if i < n_blocks])
             print(
                 f"{name:22s}  depth={depth:2d}  h={configuration.get('euler_step', 1.0)}  "
-                f"m={method}  cfg={configuration['block_indices']}"
+                f"m={method}  blocks={shared_block_count(configuration['block_indices'])}"
             )
         return
 
