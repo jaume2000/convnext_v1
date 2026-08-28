@@ -1,8 +1,16 @@
+from typing import NotRequired, TypedDict
+
 import torch
 from torch import nn
 
 from models.blocks.deltaBlock import DeltaConvnextBlock
 from .convnext import ConvNextV1
+
+
+class CustomForwardConfig(TypedDict):
+    block_indices: list[int]
+    euler_step: NotRequired[float]
+    method: NotRequired[str | None]  # None / "RK1" -> Euler; "RK2", "RK4"
 
 class DeltaConvNext(ConvNextV1):
     def __init__(self, stage3_length: int=9, useDeltas: bool=True):
@@ -130,6 +138,40 @@ class DeltaConvNext(ConvNextV1):
         self._reparametrize_shared(mean_deltas)
         self._reparametrize_deltas(mean_deltas)
 
+    def _integrate_block(self, block: nn.Module, x: torch.Tensor, euler_step: float, method: str | None):
+        if method in (None, "RK1", "EULER"):
+            return x + (block(x) - x) * euler_step
+        if method == "RK2":
+            k1 = block(x) - x
+            k2 = block(x + k1 * euler_step) - x
+            return x + euler_step / 2 * (k1 + k2)
+        if method == "RK4":
+            k1 = block(x) - x
+            k2 = block(x + k1 * euler_step) - x
+            k3 = block(x + k2 * euler_step) - x
+            k4 = block(x + k3 * euler_step) - x
+            return x + euler_step / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        raise ValueError(f"Unknown integration method: {method!r}")
+
+    def custom_forward(self, x, cnf: CustomForwardConfig):
+        block_indices = cnf["block_indices"]
+        euler_step = cnf.get("euler_step", 1.0)
+        method = cnf.get("method")
+        if method is not None:
+            method = method.upper()
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        tail = {self.stage3_length, self.stage3_length + 1}
+        for i in block_indices:
+            if i not in tail:
+                x = self._integrate_block(self.deltifiedStage3[i], x, euler_step, method)
+            else:
+                x = self.deltifiedStage3[i](x)
+        x = self.stage4(x)
+        x = self.globalPool(x)
+        x = self.fc(x)
+        return x
 
     def forward(self,x):
         x = self.stem(x)

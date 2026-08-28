@@ -188,3 +188,12 @@ class DeltaConvnextBlock(nn.Module):
             gamma = gamma + self.lsDelta
         h = h * gamma.view(1, -1, 1, 1)
         return x + self.stochasticDepth(h)
+
+    def __str__(self):
+        str = f"DeltaConvnextBlock(useDeltas={self.useDeltas})"
+        if self.has_deltas():
+            str += f"\n  deltas: {self.deltas()}"
+        # Layer Scale weight vector norm
+        gamma = self._shared[5].gamma
+        str += f"\n  gamma norm: {gamma.norm()}"
+        return str
