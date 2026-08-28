@@ -1,17 +1,3 @@
-# --- Experiment config (edit here) ---
-EXPERIMENT_NAME = "sharedConvnextAblation"
-CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
-OUTPUT_DIR = Path("outputs") / EXPERIMENT_NAME
-
-BATCH_SIZE = 4096
-NUM_WORKERS = 32
-MAX_BATCHES: int | None = None  # set e.g. 2 for a quick smoke test
-AMP = False
-RESUME = False
-NUM_CLASSES = 1000
-
-
-
 """Shared ConvNeXt custom_forward configuration sweep on ImageNet validation."""
 
 from __future__ import annotations
@@ -34,6 +20,17 @@ from tqdm import tqdm
 from models.backbones.delta_convnext import CustomForwardConfig, DeltaConvNext
 from utils.env import load_dotenv
 
+# --- Experiment config (edit here) ---
+EXPERIMENT_NAME = "sharedConvnextAblation"
+CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
+OUTPUT_DIR = Path("outputs") / EXPERIMENT_NAME
+
+BATCH_SIZE = 4096
+NUM_WORKERS = 32
+MAX_BATCHES: int | None = None  # set e.g. 2 for a quick smoke test
+AMP = False
+RESUME = False
+NUM_CLASSES = 1000
 
 
 def available_cpus() -> int:
