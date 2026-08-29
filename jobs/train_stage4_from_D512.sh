@@ -93,8 +93,9 @@ fi
 # Assigned after sourcing .env, which overrides it: .env still names the pretrained run,
 # and the train script hardcodes its own name for the same reason (the Trainer would
 # otherwise write over the last.pth this job reads). Both names must agree or the RETAKE
-# precheck below would guard a different experiment than the one that resumes.
-EXPERIMENT_NAME="512_shared_finetune_stage4"
+# precheck below would guard a different experiment than the one that resumes, so this
+# has to be edited alongside STAGE3_LENGTH in the train script.
+EXPERIMENT_NAME="D128_shared_finetune_stage4"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
 RETAKE="${RETAKE:-0}"

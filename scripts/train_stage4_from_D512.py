@@ -24,9 +24,14 @@ import torch
 
 
 load_dotenv()
+# Euler steps the shared block is unrolled into. 128 is already the continuous limit:
+# the ablation puts it 0.016 pp from the D=10000 asymptote, an order of magnitude under
+# the noise of a 50k-image top-1, and it costs 3.4x less per epoch than 512.
+STAGE3_LENGTH = 128
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
-EXPERIMENT_NAME = "512_shared_finetune_stage4"
+# Derived from the depth so the outputs folder can never disagree with what ran.
+EXPERIMENT_NAME = f"D{STAGE3_LENGTH}_shared_finetune_stage4"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
@@ -97,7 +102,7 @@ if not RETAKE:
         )
     if rank == 0:
         print(f"Loaded {CHECKPOINT} (epoch {stDict.get('epoch')}); epoch 1 val top1 must land near 0.80")
-model.setStage3Length(512)
+model.setStage3Length(STAGE3_LENGTH)
 model.freezeStages([0,1,2,3])
 model = model.to(device)
 
