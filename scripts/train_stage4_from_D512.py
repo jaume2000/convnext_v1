@@ -32,7 +32,7 @@ EXPERIMENT_NAME = f"D{STAGE3_LENGTH}_shared_finetune_stage4"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
-EPOCHS = 100
+EPOCHS = 50
 WARMUP_EPOCHS = 0
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
@@ -158,12 +158,12 @@ if rank == 0:
     print(msg)
 optimizer = AdamW(param_groups, lr=LR, betas=(0.9, 0.999))
 steps_per_epoch = len(train_loader)
-#scheduler = CosineWithWarmup(
-#    optimizer,
-#    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
-#    total_steps=EPOCHS * steps_per_epoch,
-#    min_lr=MIN_LR,
-#)
+scheduler = CosineWithWarmup(
+    optimizer,
+    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
+    total_steps=EPOCHS * steps_per_epoch,
+    min_lr=MIN_LR,
+)
 if rank == 0:
     print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
@@ -183,7 +183,7 @@ trainer = Trainer(
     experiment_name=EXPERIMENT_NAME,
     model=model,
     optimizer=optimizer,
-    scheduler=None, # Removed the cosine scheduler
+    scheduler=scheduler,
     criterion=SoftTargetCrossEntropy(),
     device=device,
     train_loader=train_loader,
