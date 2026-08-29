@@ -35,5 +35,4 @@ def load_dotenv(path: str | Path | None = None, *, override: bool = False) -> Pa
 
 def experiment_name(default: str) -> str:
     """EXPERIMENT_NAME from the environment, after loading .env if present."""
-    load_dotenv()
     return os.environ.get("EXPERIMENT_NAME", default)

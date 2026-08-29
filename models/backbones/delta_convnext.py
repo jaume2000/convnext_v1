@@ -3,6 +3,7 @@ from typing import NotRequired, TypedDict
 import torch
 from torch import nn
 
+from models.blocks.convenxt_v1 import ConvnextBlock
 from models.blocks.deltaBlock import DeltaConvnextBlock
 from .convnext import ConvNextV1
 
@@ -17,6 +18,29 @@ class DeltaConvNext(ConvNextV1):
         super().__init__()
         self.stage3_length = stage3_length
         self.useDeltas = useDeltas
+        self.eulerStep = 1.0
+
+    def rewire(self, sharedBlock: int = 5):
+        stage3_offset = self.accum_depths[2]
+        self.sharedBlock:ConvnextBlock = self.stage3[sharedBlock].block   # único registro del bloque
+
+        deltablocks = [
+            DeltaConvnextBlock(
+                self.sharedBlock,
+                stochasticDepth=self.drop_paths[i + stage3_offset],
+                useDeltas=self.useDeltas,
+                eulerStep=self.eulerStep,
+            )
+            for i in range(self.stage3_length)
+        ]
+        # stage3 no son solo los 9 bloques: acaba en LayerNorm2d + conv stride 2 que lleva
+        # 384 -> 768 canales para stage4. Si ese tramo no se copia, stage4 recibe 384.
+        self.tail = self.stage3[self.depths[2]:]
+        self.deltifiedStage3 = nn.Sequential(*deltablocks, *self.tail)
+        del self.stage3
+        mode = "shared-only (no delta params)" if not self.useDeltas else f"{self.stage3_length} delta blocks"
+        print(f"Rewired: stage3 -> 1 shared block + {mode} + {len(self.tail)} tail layers")
+
 
     def setUseDeltas(self, useDeltas: bool):
         """Toggle whether blocks add deltas in forward. Does not delete them."""
@@ -52,26 +76,6 @@ class DeltaConvNext(ConvNextV1):
             if isinstance(block, DeltaConvnextBlock):
                 for _, delta in block.deltas():
                     delta.requires_grad_(True)
-
-    def rewire(self, sharedBlock: int = 5):
-        stage3_offset = self.accum_depths[2]
-        self.sharedBlock = self.stage3[sharedBlock].block   # único registro del bloque
-
-        deltablocks = [
-            DeltaConvnextBlock(
-                self.sharedBlock,
-                stochasticDepth=self.drop_paths[i + stage3_offset],
-                useDeltas=self.useDeltas,
-            )
-            for i in range(self.stage3_length)
-        ]
-        # stage3 no son solo los 9 bloques: acaba en LayerNorm2d + conv stride 2 que lleva
-        # 384 -> 768 canales para stage4. Si ese tramo no se copia, stage4 recibe 384.
-        tail = self.stage3[self.depths[2]:]
-        self.deltifiedStage3 = nn.Sequential(*deltablocks, *tail)
-        del self.stage3
-        mode = "shared-only (no delta params)" if not self.useDeltas else f"{self.stage3_length} delta blocks"
-        print(f"Rewired: stage3 -> 1 shared block + {mode} + {len(tail)} tail layers")
 
     def getSharedWeights(self):
         return DeltaConvnextBlock.sharedWeights(self.sharedBlock)
@@ -137,6 +141,36 @@ class DeltaConvNext(ConvNextV1):
         mean_deltas = self._getMeanDeltas()
         self._reparametrize_shared(mean_deltas)
         self._reparametrize_deltas(mean_deltas)
+
+    def setStage3Length(self, stage3Length: int):
+        if self.useDeltas:
+            raise ValueError("Cannot set stage3 length with deltas enabled")
+        self.extendedStage3Length = stage3Length
+        self.eulerStep = self.stage3_length / self.extendedStage3Length
+        deltablock = DeltaConvnextBlock(
+                self.sharedBlock,
+                stochasticDepth=0.0,
+                useDeltas=False,
+                eulerStep=self.eulerStep,
+            )
+        self.deltifiedStage3 = nn.Sequential(*[deltablock for i in range(stage3Length)], *self.tail)
+
+    def freezeStages(self, stages: list[int]):
+        if 0 in stages:
+            self.stem.requires_grad_(False)
+        if 1 in stages:
+            self.stage1.requires_grad_(False)
+        if 2 in stages:
+            self.stage2.requires_grad_(False)
+        if 3 in stages:
+            self.deltifiedStage3.requires_grad_(False)
+            self.sharedBlock.requires_grad_(False)
+        if 4 in stages:
+            self.stage4.requires_grad_(False)
+        if 5 in stages:
+            self.globalPool.requires_grad_(False)
+            self.fc.requires_grad_(False)
+
 
     def _integrate_block(self, block: nn.Module, x: torch.Tensor, euler_step: float, method: str | None):
         # f(y) = block(y) - y; must subtract the evaluation point, not x.

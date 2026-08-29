@@ -6,14 +6,14 @@ from models.blocks.stochasticDepth import StochasticDepth
 
 
 class DeltaConvnextBlock(nn.Module):
-    def __init__(self, sharedBlock, stochasticDepth=0.1, useDeltas=True):
+    def __init__(self, sharedBlock, stochasticDepth=0.1, useDeltas=True, eulerStep=1.0):
         super().__init__()
         if len(sharedBlock) != 6:
             raise ValueError("Shared block must have 6 layers")
         # Referencia sin registrar: no duplica claves en el state_dict.
         object.__setattr__(self, "_shared", sharedBlock)
         self.useDeltas = useDeltas
-
+        self.eulerStep = eulerStep
         if useDeltas:
             dw, ln, pw1, _, pw2, ls = sharedBlock
             z = lambda t: nn.Parameter(torch.zeros_like(t))
@@ -187,7 +187,7 @@ class DeltaConvnextBlock(nn.Module):
         if self.useDeltas and self.has_deltas():
             gamma = gamma + self.lsDelta
         h = h * gamma.view(1, -1, 1, 1)
-        return x + self.stochasticDepth(h)
+        return x + self.stochasticDepth(h) * self.eulerStep
 
     def __str__(self):
         str = f"DeltaConvnextBlock(useDeltas={self.useDeltas})"
