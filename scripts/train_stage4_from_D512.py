@@ -30,11 +30,11 @@ EXPERIMENT_NAME = "512_shared_finetune_stage4"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
-EPOCHS = 300
-WARMUP_EPOCHS = 10
+EPOCHS = 100
+WARMUP_EPOCHS = 0
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-3
+LR = 1e-4
 MIN_LR = 1e-7
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
