@@ -139,18 +139,23 @@ class DeltaConvNext(ConvNextV1):
         self._reparametrize_deltas(mean_deltas)
 
     def _integrate_block(self, block: nn.Module, x: torch.Tensor, euler_step: float, method: str | None):
+        # f(y) = block(y) - y; must subtract the evaluation point, not x.
+        def f(y: torch.Tensor) -> torch.Tensor:
+            return block(y) - y
+
+        h = euler_step
         if method in (None, "RK1", "EULER"):
-            return x + (block(x) - x) * euler_step
+            return x + f(x) * h
         if method == "RK2":
-            k1 = block(x) - x
-            k2 = block(x + k1 * euler_step) - x
-            return x + euler_step / 2 * (k1 + k2)
+            k1 = f(x)
+            k2 = f(x + h * k1)
+            return x + h / 2 * (k1 + k2)
         if method == "RK4":
-            k1 = block(x) - x
-            k2 = block(x + k1 * euler_step) - x
-            k3 = block(x + k2 * euler_step) - x
-            k4 = block(x + k3 * euler_step) - x
-            return x + euler_step / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+            k1 = f(x)
+            k2 = f(x + h / 2 * k1)
+            k3 = f(x + h / 2 * k2)
+            k4 = f(x + h * k3)
+            return x + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
         raise ValueError(f"Unknown integration method: {method!r}")
 
     def custom_forward(self, x, cnf: CustomForwardConfig):
