@@ -24,9 +24,6 @@ import torch
 
 
 load_dotenv()
-# Euler steps the shared block is unrolled into. 128 is already the continuous limit:
-# the ablation puts it 0.016 pp from the D=10000 asymptote, an order of magnitude under
-# the noise of a 50k-image top-1, and it costs 3.4x less per epoch than 512.
 STAGE3_LENGTH = 128
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
@@ -36,14 +33,14 @@ EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
 EPOCHS = 100
-WARMUP_EPOCHS = 3
+WARMUP_EPOCHS = 0
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-4
-MIN_LR = 1e-7
+LR = 1e-6
+MIN_LR = 1e-8
 # Applied to conv/linear weights only, see build_param_groups.
-WEIGHT_DECAY = 0.05
-DELTA_WEIGHT_DECAY = 0.05
+WEIGHT_DECAY = 0.00
+DELTA_WEIGHT_DECAY = 0.00
 # Chained 12h SLURM jobs set RETAKE=1 in .env to resume without editing this file.
 RETAKE = os.environ.get("RETAKE", "0") == "1"
 
@@ -161,12 +158,12 @@ if rank == 0:
     print(msg)
 optimizer = AdamW(param_groups, lr=LR, betas=(0.9, 0.999))
 steps_per_epoch = len(train_loader)
-scheduler = CosineWithWarmup(
-    optimizer,
-    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
-    total_steps=EPOCHS * steps_per_epoch,
-    min_lr=MIN_LR,
-)
+#scheduler = CosineWithWarmup(
+#    optimizer,
+#    warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
+#    total_steps=EPOCHS * steps_per_epoch,
+#    min_lr=MIN_LR,
+#)
 if rank == 0:
     print(f"Peak LR: {LR:.2e} after {WARMUP_EPOCHS} warmup epochs, cosine over {EPOCHS} epochs")
 
@@ -186,7 +183,7 @@ trainer = Trainer(
     experiment_name=EXPERIMENT_NAME,
     model=model,
     optimizer=optimizer,
-    scheduler=scheduler,
+    scheduler=None, # Removed the cosine scheduler
     criterion=SoftTargetCrossEntropy(),
     device=device,
     train_loader=train_loader,
