@@ -31,7 +31,7 @@ EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
 EPOCHS = 100
-WARMUP_EPOCHS = 0
+WARMUP_EPOCHS = 3
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 1e-4
