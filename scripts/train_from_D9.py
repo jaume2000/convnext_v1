@@ -24,22 +24,22 @@ import torch
 
 
 load_dotenv()
-STAGE3_LENGTH = 128
+STAGE3_LENGTH = 27
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
 # Derived from the depth so the outputs folder can never disagree with what ran.
-EXPERIMENT_NAME = f"D{STAGE3_LENGTH}_shared_finetune_stage4"
+EXPERIMENT_NAME = f"D{STAGE3_LENGTH}_shared_finetune_stage3"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = False  # shared-only baseline; delta params are not allocated
 USE_DDP = True
-EPOCHS = 50
+EPOCHS = 100
 WARMUP_EPOCHS = 0
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 1e-6
 MIN_LR = 1e-8
 # Applied to conv/linear weights only, see build_param_groups.
-WEIGHT_DECAY = 0.00
+WEIGHT_DECAY = 0.05
 DELTA_WEIGHT_DECAY = 0.00
 # Chained 12h SLURM jobs set RETAKE=1 in .env to resume without editing this file.
 RETAKE = os.environ.get("RETAKE", "0") == "1"
@@ -100,7 +100,7 @@ if not RETAKE:
     if rank == 0:
         print(f"Loaded {CHECKPOINT} (epoch {stDict.get('epoch')}); epoch 1 val top1 must land near 0.80")
 model.setStage3Length(STAGE3_LENGTH)
-model.freezeStages([0,1,2,3])
+#model.freezeStages([0,1,2,3])
 model = model.to(device)
 
 
