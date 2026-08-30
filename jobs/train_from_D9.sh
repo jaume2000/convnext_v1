@@ -95,7 +95,7 @@ fi
 # otherwise write over the last.pth this job reads). Both names must agree or the RETAKE
 # precheck below would guard a different experiment than the one that resumes, so this
 # has to be edited alongside STAGE3_LENGTH in the train script.
-EXPERIMENT_NAME="D128_shared_finetune_stage4"
+EXPERIMENT_NAME="D27_shared_finetune_stage3"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
 RETAKE="${RETAKE:-0}"
@@ -136,7 +136,7 @@ if [[ "${STAGE_DATA:-1}" == "1" ]]; then
   fi
 fi
 
-TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/9.py}"
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_from_D9.py}"
 
 echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
