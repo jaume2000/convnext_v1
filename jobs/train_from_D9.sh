@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=stage4_d512
+#SBATCH --job-name=D9_finetune_stage3
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -9,18 +9,18 @@
 #SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
-#SBATCH --output=logs/train_stage4_from_D512_%j.out
-#SBATCH --error=logs/train_stage4_from_D512_%j.err
+#SBATCH --output=logs/train_from_D9_%j.out
+#SBATCH --error=logs/train_from_D9_%j.err
 
-# Fine-tunes stage4 + head on top of the shared block unrolled to 512 Euler steps.
+# Fine-tunes stage3 + head on top of the shared block unrolled to 9 Euler steps.
 # Everything up to stage3 stays frozen, including the shared block itself.
 #
 # Submit from the repo root:
-#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_stage4_from_D512.sh
+#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_from_D9.sh
 #
 # Chain 12 h jobs after the first segment (or a time-limit kill):
 #   echo 'RETAKE=1' >> .env   # or export RETAKE=1 for one submission
-#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_stage4_from_D512.sh
+#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_from_D9.sh
 
 set -euo pipefail
 
@@ -136,7 +136,7 @@ if [[ "${STAGE_DATA:-1}" == "1" ]]; then
   fi
 fi
 
-TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_stage4_from_D512.py}"
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/9.py}"
 
 echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
