@@ -79,7 +79,7 @@ CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
 # Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
 IGNORE_TOP_K_CHANNELS = 1
-VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH"]
+VIDEO_MAPS = ["scatter_x", "scatter_h"]
 
 CMAP_X = "viridis"
 CMAP_H = "RdBu_r"
@@ -89,6 +89,9 @@ SHARED_SCALE = True
 SAVE_TENSORS = False
 GRID_MAX_FRAMES = 36
 SCATTER_MAX_POINTS = 99999999
+# Animation: sample N features once, track the same indices across depth.
+SCATTER_ANIM_MAX_POINTS = 8000
+SCATTER_ANIM_SEED = 0
 # Building a GIF loads every frame into RAM — skip when D is large.
 GIF_MAX_FRAMES = 9999
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
@@ -114,6 +117,8 @@ KIND_TITLES = {
     "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||",
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
+    "scatter_x": "X cumulative: x_d → x_{d+1}",
+    "scatter_h": "residual: x_d → h_d = f(x_d)",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -824,11 +829,81 @@ def scatter_io(
     plt.close(fig)
 
 
+def scatter_io_animation(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    *,
+    title: str,
+    frame_dir: Path,
+    out_stem: Path,
+    xlabel: str,
+    ylabel: str,
+    fps: float,
+    max_points: int = SCATTER_ANIM_MAX_POINTS,
+    seed: int = SCATTER_ANIM_SEED,
+) -> dict[str, Path]:
+    """Animate (input[d], output[d]) for a fixed random feature subset across depth.
+
+    Samples feature indices once, then draws the same points at every depth so the
+    cloud can be watched moving.
+    """
+    assert inputs.shape == outputs.shape
+    n = inputs.shape[0]
+    flat_in = inputs.reshape(n, -1)
+    flat_out = outputs.reshape(n, -1)
+    n_feat = flat_in.shape[1]
+    if n_feat > max_points:
+        g = torch.Generator().manual_seed(seed)
+        idx = torch.randperm(n_feat, generator=g)[:max_points]
+    else:
+        idx = torch.arange(n_feat)
+    tracked_in = flat_in[:, idx]
+    tracked_out = flat_out[:, idx]
+    lo = min(tracked_in.min().item(), tracked_out.min().item())
+    hi = max(tracked_in.max().item(), tracked_out.max().item())
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = lo - pad, hi + pad
+
+    if frame_dir.exists():
+        shutil.rmtree(frame_dir)
+    frame_dir.mkdir(parents=True)
+
+    # Fixed colour per sampled slot so individual points are easier to follow.
+    n_pts = idx.numel()
+    point_colors = plt.cm.viridis(
+        (torch.arange(n_pts).float() / max(n_pts - 1, 1)).numpy() if n_pts > 1 else [0.5]
+    )
+    for d in range(n):
+        fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+        ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0)
+        ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+        ax.scatter(
+            tracked_in[d].numpy(),
+            tracked_out[d].numpy(),
+            s=8,
+            alpha=0.45,
+            c=point_colors,
+            linewidths=0,
+        )
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title}\nd={d}  ({idx.numel()} features, fixed sample)")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(alpha=0.3)
+        fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
+        plt.close(fig)
+
+    return write_video(frame_dir, out_stem, fps=fps, n_frames=n)
+
+
 def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
     fps = float(res["spec"]["fps"])
     run_name = res["name"]
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
     map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", "h_CH", "x_CH")]
+    scatter_kinds = [k for k in VIDEO_MAPS if k in ("scatter_x", "scatter_h")]
 
     for kind in channel_kinds:
         mean_map = res[f"mean_{kind}"]
@@ -861,6 +936,31 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
         if maps.shape[0] <= GRID_MAX_FRAMES:
             save_grid(maps, run_dir / f"{kind}_grid.png", title=f"{run_name}\n{formula}", kind=kind)
         written = write_video(frame_dir, run_dir / kind, fps=fps, n_frames=maps.shape[0])
+        print(f"  {kind}: {[p.name for p in written.values()]}")
+
+    for kind in scatter_kinds:
+        if kind == "scatter_x":
+            written = scatter_io_animation(
+                res["mean_x"][:-1],
+                res["mean_x"][1:],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                xlabel="x_d",
+                ylabel="x_{d+1}",
+                fps=fps,
+            )
+        else:
+            written = scatter_io_animation(
+                res["mean_x"],
+                res["mean_h"],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                xlabel="x_d",
+                ylabel="h_d = block(x_d) - x_d",
+                fps=fps,
+            )
         print(f"  {kind}: {[p.name for p in written.values()]}")
 
 
@@ -925,11 +1025,11 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     print(f"channels={channels}")
     write_videos(res, channels, run_dir)
 
-    # x → x+f(x): consecutive states. x → h: residual branch only (no +x).
+    # Static overlays (always). Animations are gated by VIDEO_MAPS via write_videos.
     scatter_io(
         res["mean_x"][:-1],
         res["mean_x"][1:],
-        title=f"{name} | X cumulative: x_d → x_{{d+1}}",
+        title=f"{name} | {KIND_TITLES['scatter_x']}",
         path=run_dir / "scatter_x.png",
         xlabel="x_d",
         ylabel="x_{d+1}",
@@ -937,7 +1037,7 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     scatter_io(
         res["mean_x"],
         res["mean_h"],
-        title=f"{name} | residual: x_d → h_d = f(x_d)",
+        title=f"{name} | {KIND_TITLES['scatter_h']}",
         path=run_dir / "scatter_h.png",
         xlabel="x_d",
         ylabel="h_d = block(x_d) - x_d",
