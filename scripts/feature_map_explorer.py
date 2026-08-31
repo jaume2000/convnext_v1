@@ -93,8 +93,12 @@ FIGSIZE, DPI = (4.4, 4.2), 100
 # C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
 CH_PX_PER_CELL = 8
 CH_DPI = 100
-CH_CBAR_PX = 40
-CH_TITLE_PX = 32
+CH_TITLE_PX = 40
+CH_LEFT_PX = 44  # room for H tick labels / ylabel
+CH_XLABEL_PX = 52  # channel ticks + "channel" under the map
+CH_CBAR_GAP_PX = 40  # gap for colorbar tick labels (drawn above the strip)
+CH_CBAR_PX = 18  # colorbar strip height
+CH_BOTTOM_PAD_PX = 10
 CH_GRID_PX_PER_CELL = 3  # smaller cells for multi-panel grids
 
 KIND_TITLES = {
@@ -300,10 +304,19 @@ def ch_cut(maps: torch.Tensor) -> torch.Tensor:
 
 
 def ch_canvas_px(n_h: int, n_c: int, *, px_per_cell: int) -> tuple[int, int]:
-    """Figure size in pixels: data is n_c×n_h cells, plus title and bottom colorbar."""
+    """Figure size in pixels: data n_c×n_h cells + title, left pad, labels, colorbar."""
     data_w = n_c * px_per_cell
     data_h = n_h * px_per_cell
-    return data_w, data_h + CH_CBAR_PX + CH_TITLE_PX
+    fig_w = data_w + CH_LEFT_PX
+    fig_h = (
+        data_h
+        + CH_TITLE_PX
+        + CH_XLABEL_PX
+        + CH_CBAR_GAP_PX
+        + CH_CBAR_PX
+        + CH_BOTTOM_PAD_PX
+    )
+    return fig_w, fig_h
 
 
 def render_ch_frame(
@@ -318,11 +331,19 @@ def render_ch_frame(
     """Save a C×H slice with native map aspect (channels = vertical columns)."""
     n_h, n_c = frame.shape
     fig_w_px, fig_h_px = ch_canvas_px(n_h, n_c, px_per_cell=px_per_cell)
+    data_w_px = n_c * px_per_cell
     data_h_px = n_h * px_per_cell
+
+    # Bottom → top: pad | cbar | cbar tick labels | channel labels | data | title
+    y_cbar = CH_BOTTOM_PAD_PX
+    y_data = y_cbar + CH_CBAR_PX + CH_CBAR_GAP_PX + CH_XLABEL_PX
+
+    def _rect(x_px: float, y_px: float, w_px: float, h_px: float) -> list[float]:
+        return [x_px / fig_w_px, y_px / fig_h_px, w_px / fig_w_px, h_px / fig_h_px]
 
     fig = plt.figure(figsize=(fig_w_px / CH_DPI, fig_h_px / CH_DPI), dpi=CH_DPI)
     fig.text(
-        0.5,
+        (CH_LEFT_PX + data_w_px / 2) / fig_w_px,
         1 - CH_TITLE_PX / (2 * fig_h_px),
         f"{title}\n{frame_label}",
         ha="center",
@@ -330,9 +351,7 @@ def render_ch_frame(
         fontsize=9,
     )
 
-    ax_bottom = CH_CBAR_PX / fig_h_px
-    ax_height = data_h_px / fig_h_px
-    ax = fig.add_axes([0, ax_bottom, 1, ax_height])
+    ax = fig.add_axes(_rect(CH_LEFT_PX, y_data, data_w_px, data_h_px))
     im = ax.imshow(
         frame.numpy(),
         aspect="equal",
@@ -342,16 +361,29 @@ def render_ch_frame(
     )
     ax.set_xlim(-0.5, n_c - 0.5)
     ax.set_ylim(-0.5, n_h - 0.5)
-    ax.set_xlabel("channel", fontsize=8)
-    ax.set_ylabel("H", fontsize=8)
+    ax.set_xlabel("channel", fontsize=8, labelpad=6)
+    ax.set_ylabel("H", fontsize=8, labelpad=4)
     step = max(1, n_c // 8)
-    ax.set_xticks(list(range(0, n_c, step)) + ([n_c - 1] if (n_c - 1) % step else []))
+    xticks = list(range(0, n_c, step))
+    if (n_c - 1) % step:
+        xticks.append(n_c - 1)
+    ax.set_xticks(xticks)
     ax.set_yticks(range(n_h))
+    ax.tick_params(axis="x", labelsize=7, pad=3)
+    ax.tick_params(axis="y", labelsize=7, pad=2)
 
-    cax_h = (CH_CBAR_PX * 0.5) / fig_h_px
-    cax = fig.add_axes([0.06, 0.03, 0.88, cax_h])
-    fig.colorbar(im, cax=cax, orientation="horizontal")
-    fig.savefig(path, pad_inches=0.05)
+    cax = fig.add_axes(_rect(CH_LEFT_PX, y_cbar, data_w_px, CH_CBAR_PX))
+    cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
+    cbar.set_ticks([])
+    # Color scale numbers in figure coords (above the strip) so they cannot be clipped.
+    vmin, vmax = im.get_clim()
+    n_ticks = 7
+    tick_vals = [vmin + (vmax - vmin) * i / (n_ticks - 1) for i in range(n_ticks)]
+    y_tick = (y_cbar + CH_CBAR_PX + 6) / fig_h_px
+    for val in tick_vals:
+        x = (CH_LEFT_PX + data_w_px * ((val - vmin) / (vmax - vmin) if vmax > vmin else 0.0)) / fig_w_px
+        fig.text(x, y_tick, f"{val:.3g}", ha="center", va="bottom", fontsize=7)
+    fig.savefig(path)
     plt.close(fig)
 
 
