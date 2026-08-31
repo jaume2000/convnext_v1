@@ -80,7 +80,7 @@ CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
 # Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
 IGNORE_TOP_K_CHANNELS = 1
-VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH", "scatter_x", "scatter_h"]
+VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH", "scatter_ch_x", "scatter_ch_h", "scatter_h"]
 
 CMAP_X = "viridis"
 CMAP_H = "RdBu_r"
@@ -99,6 +99,9 @@ SCATTER_ANIM_MAX_POINTS = 8000
 SCATTER_ANIM_SEED = 0
 # turbo: high local contrast (nearby channels look distinct); better than viridis here.
 SCATTER_ANIM_CMAP = "turbo"
+# Spaghetti: trajectories d ↦ value for a fixed feature sample (colour = channel).
+SPAGHETTI_MAX_LINES = 500
+SPAGHETTI_SEED = 0
 # Building a GIF loads every frame into RAM — skip when D is large.
 GIF_MAX_FRAMES = 9999
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
@@ -124,8 +127,9 @@ KIND_TITLES = {
     "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||",
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
-    "scatter_x": "flow from init: x_0 → x_d",
-    "scatter_h": "residual field: x_d → f(x_d) = h_d = block(x_d) - x_d",
+    "scatter_ch_x": "state vs channel: C → x_d",
+    "scatter_ch_h": "field vs channel: C → h_d (= Δx_d / ES)",
+    "scatter_h": "residual field: x_d → h_d (= Δx_d / ES)",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -212,9 +216,8 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
 def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, batch_size, dataset):
     """Integrate the shared block and collect per-image dynamics + mean maps.
 
-    Stored residual maps: h = block(x) - x (= ODE field f). Update: x ← x + ES·h.
-    Scatter / rectitude use f = h. The norms panel still reports \|h\|/ES as a
-    separate derived curve (legacy naming).
+    Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
+    i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
     """
     method = method.upper() if isinstance(method, str) else method
     n = len(indices)
@@ -279,7 +282,7 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             norm_x_i[start : start + bsz, d] = n_x.double().cpu()
             align_h0_i[start : start + bsz, d] = F.cosine_similarity(h0_flat, h_flat, dim=1).double().cpu()
             H_rows.append(h_flat.detach().cpu())
-            # Path length L = ES * sum ||f_d|| with f = h = block(x)-x.
+            # Path length L = sum ||Δx_d|| = ES * sum ||h_d||.
             if d < D:
                 path_len = path_len + es * n_h.double()
 
@@ -309,7 +312,7 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             l2_map_h[d] += w * (h - h_next).norm(dim=1).sum(0)
             x, h = x_next, h_next
 
-        # Rectitude: L = ES * sum ||f_d|| (f = h), N = ||x_D - x_0||, R = N/L.
+        # Rectitude: L = ES * sum ||h_d||, N = ||x_D - x_0||, R = N/L.
         disp = (x - x0).flatten(1).norm(dim=1).double()
         rect_L_i[start : start + bsz] = path_len.cpu()
         rect_N_i[start : start + bsz] = disp.cpu()
@@ -333,12 +336,9 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
     depths = torch.arange(D + 1)
     norm_h_mean, norm_h_std = mean_std(norm_h_i)
     norm_x_mean, norm_x_std = mean_std(norm_x_i)
-    # f = h / ES
-    norm_f_mean, norm_f_std = norm_h_mean / max(es, 1e-12), norm_h_std / max(es, 1e-12)
-    norm_f_over_x_mean = norm_f_mean / np.clip(norm_x_mean, 1e-30, None)
-    # delta method-ish std for ratio: skip exact; use std of per-image ratios.
-    norm_f_over_x_i = (norm_h_i / max(es, 1e-12)) / norm_x_i.clamp_min(1e-30)
-    norm_f_over_x_std = norm_f_over_x_i.std(0, unbiased=False).numpy()
+    # h = Δx/ES = stored residual; plot ||h|| and ||h||/||x|| (no extra /ES).
+    norm_h_over_x_i = norm_h_i / norm_x_i.clamp_min(1e-30)
+    norm_h_over_x_mean, norm_h_over_x_std = mean_std(norm_h_over_x_i)
 
     cos_flat_mean, cos_flat_std = mean_std(cos_flat_i)
     cos_spatial_mean, cos_spatial_std = mean_std(cos_spatial_i)
@@ -359,16 +359,12 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             "norm_h_std": norm_h_std,
             "norm_x": norm_x_mean,
             "norm_x_std": norm_x_std,
-            "norm_f": norm_f_mean,
-            "norm_f_std": norm_f_std,
-            "norm_f_over_norm_x": norm_f_over_x_mean,
-            "norm_f_over_norm_x_std": norm_f_over_x_std,
+            "norm_h_over_norm_x": norm_h_over_x_mean,
+            "norm_h_over_norm_x_std": norm_h_over_x_std,
             "cos_h0_hd": align_mean,
             "cos_h0_hd_std": align_std,
         }
     )
-    # Keep legacy column name used elsewhere.
-    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"].clip(lower=1e-30)
 
     pairs = pd.DataFrame(
         {
@@ -494,7 +490,6 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
     depths = torch.arange(D + 1)
     norm_h = mean_h.flatten(1).norm(dim=1)
     norm_x = mean_x.flatten(1).norm(dim=1)
-    norm_f = norm_h / max(es, 1e-12)
     align = torch.stack(
         [F.cosine_similarity(mean_h[0].flatten(), mean_h[d].flatten(), dim=0) for d in range(D + 1)]
     )
@@ -506,15 +501,12 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "norm_h_std": 0.0,
             "norm_x": norm_x.numpy(),
             "norm_x_std": 0.0,
-            "norm_f": norm_f.numpy(),
-            "norm_f_std": 0.0,
-            "norm_f_over_norm_x": (norm_f / norm_x.clamp_min(1e-30)).numpy(),
-            "norm_f_over_norm_x_std": 0.0,
+            "norm_h_over_norm_x": (norm_h / norm_x.clamp_min(1e-30)).numpy(),
+            "norm_h_over_norm_x_std": 0.0,
             "cos_h0_hd": align.numpy(),
             "cos_h0_hd_std": 0.0,
         }
     )
-    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"].clip(lower=1e-30)
 
     cos_h = []
     cos_spatial = []
@@ -956,19 +948,19 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), layout="constrained")
 
-    # (0,0) ||f|| and ||f||/||x||
+    # (0,0) ||h|| and ||h||/||x||  (h = Δx/ES)
     ax = axes[0, 0]
     _plot_mean_std(
-        ax, t_state, norms["norm_f"], norms.get("norm_f_std", 0.0), label=r"$\|f_d\|$"
+        ax, t_state, norms["norm_h"], norms.get("norm_h_std", 0.0), label=r"$\|h_d\|$"
     )
     _plot_mean_std(
         ax,
         t_state,
-        norms["norm_f_over_norm_x"],
-        norms.get("norm_f_over_norm_x_std", 0.0),
-        label=r"$\|f_d\| / \|x_d\|$",
+        norms["norm_h_over_norm_x"],
+        norms.get("norm_h_over_norm_x_std", 0.0),
+        label=r"$\|h_d\| / \|x_d\|$",
     )
-    ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($\mathrm{f}=h/\mathrm{ES}$)")
+    ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($h=\Delta x/\mathrm{ES}$)")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
 
@@ -1116,14 +1108,14 @@ def scatter_residual_field(
     channel: int | None = SCATTER_CHANNEL,
     max_points: int = SCATTER_MAX_POINTS,
 ) -> None:
-    """Static scatter of (x_d, f(x_d)) with f = h = block(x) - x."""
+    """Static scatter of (x_d, h_d) with h = Δx/ES = block(x)-x."""
     scatter_io(
         res["mean_x"],
         res["mean_h"],
         title=f"{res['name']} | {KIND_TITLES['scatter_h']}",
         path=path,
         xlabel="x_d",
-        ylabel=r"$f(x_d) = h_d$",
+        ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
         max_points=max_points,
         channel=channel,
         draw_y_equals_x=False,
@@ -1150,7 +1142,7 @@ def scatter_overlay_by_d(
             title="",
             path=path,
             xlabel="x_d",
-            ylabel=r"$f(x_d) = h_d$",
+            ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
             max_points=max_points,
             channel=channel,
             draw_y_equals_x=False,
@@ -1162,6 +1154,166 @@ def scatter_overlay_by_d(
     ax.legend(fontsize=8, markerscale=2)
     fig.savefig(path, dpi=140)
     plt.close(fig)
+
+
+def _sample_feature_indices(n_feat: int, max_points: int, seed: int) -> torch.Tensor:
+    if n_feat > max_points:
+        g = torch.Generator().manual_seed(seed)
+        return torch.randperm(n_feat, generator=g)[:max_points]
+    return torch.arange(n_feat)
+
+
+def spaghetti_trajectories(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    ylabel: str,
+    euler_step: float,
+    max_lines: int = SPAGHETTI_MAX_LINES,
+    seed: int = SPAGHETTI_SEED,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Plot d ↦ value trajectories for a fixed random feature sample (colour = channel)."""
+    assert maps.ndim == 4
+    n, n_c, n_h, n_w = maps.shape
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"spaghetti channel {channel} outside 0..{n_c - 1}")
+        maps = maps[:, channel : channel + 1]
+        n_c = 1
+    flat = maps.reshape(n, -1)
+    spatial = n_h * n_w
+    idx = _sample_feature_indices(flat.shape[1], max_lines, seed)
+    ch = (idx // spatial).numpy()
+    ys = flat[:, idx].numpy()  # [T, N]
+    t = np.arange(n, dtype=np.float64) * float(euler_step)
+    cmap = plt.get_cmap(SCATTER_ANIM_CMAP)
+    colors = cmap(ch / max(n_c - 1, 1))
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.0), layout="constrained")
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for i in range(ys.shape[1]):
+        ax.plot(t, ys[:, i], color=colors[i], alpha=0.35, lw=0.9, solid_capstyle="round")
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
+    ax.set_xlabel("t = d · ES")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"{title}\n({ys.shape[1]} trajectories)")
+    ax.grid(alpha=0.3)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def scatter_vs_channel(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    ylabel: str,
+    max_points: int = SCATTER_MAX_POINTS,
+    seed: int = SCATTER_ANIM_SEED,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Static overlay of (channel, value_d) for all depths (colour = depth)."""
+    assert maps.ndim == 4
+    n, n_c, n_h, n_w = maps.shape
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"scatter channel {channel} outside 0..{n_c - 1}")
+        maps = maps[:, channel : channel + 1]
+        n_c = 1
+    flat = maps.reshape(n, -1)
+    spatial = n_h * n_w
+    idx = _sample_feature_indices(flat.shape[1], max_points, seed)
+    ch = (idx // spatial).numpy().astype(np.float64)
+    rng = np.random.default_rng(seed)
+    ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
+    vals = flat[:, idx]
+    lo = vals.min().item()
+    hi = vals.max().item()
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
+    cmap = plt.cm.viridis
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for d in range(n):
+        ax.scatter(
+            ch_plot,
+            vals[d].numpy(),
+            s=4,
+            alpha=0.25,
+            c=[cmap(d / max(n - 1, 1))],
+            linewidths=0,
+            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+        )
+    ax.set_xlabel("channel")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xlim(-0.5, n_c - 0.5)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=7, markerscale=2)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def scatter_vs_channel_animation(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    frame_dir: Path,
+    out_stem: Path,
+    ylabel: str,
+    fps: float,
+    max_points: int = SCATTER_ANIM_MAX_POINTS,
+    seed: int = SCATTER_ANIM_SEED,
+) -> dict[str, Path]:
+    """Animate (channel, value_d) for a fixed feature sample across depth."""
+    assert maps.ndim == 4
+    n, n_c, n_h, n_w = maps.shape
+    flat = maps.reshape(n, -1)
+    spatial = n_h * n_w
+    idx = _sample_feature_indices(flat.shape[1], max_points, seed)
+    ch = (idx // spatial).numpy().astype(np.float64)
+    rng = np.random.default_rng(seed)
+    ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
+    vals = flat[:, idx]
+    lo = vals.min().item()
+    hi = vals.max().item()
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = lo - pad, hi + pad
+
+    if frame_dir.exists():
+        shutil.rmtree(frame_dir)
+    frame_dir.mkdir(parents=True)
+
+    for d in range(n):
+        fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
+        ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+        sc = ax.scatter(
+            ch_plot,
+            vals[d].numpy(),
+            s=8,
+            alpha=0.55,
+            c=ch,
+            cmap=SCATTER_ANIM_CMAP,
+            vmin=0,
+            vmax=max(n_c - 1, 1),
+            linewidths=0,
+        )
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
+        ax.set_xlim(-0.5, n_c - 0.5)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel("channel")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title}\nd={d}  ({idx.numel()} features)")
+        ax.grid(alpha=0.3)
+        fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
+        plt.close(fig)
+
+    return write_video(frame_dir, out_stem, fps=fps, n_frames=n)
 
 
 def scatter_io_animation(
@@ -1179,20 +1331,14 @@ def scatter_io_animation(
 ) -> dict[str, Path]:
     """Animate (input[d], output[d]) for a fixed random feature subset across depth.
 
-    Samples feature indices once, then draws the same points at every depth so the
-    cloud can be watched moving. Colour encodes channel index (stable over depth).
+    Colour encodes channel index (stable over depth).
     """
     assert inputs.shape == outputs.shape and inputs.ndim == 4
     n, n_c, n_h, n_w = inputs.shape
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
-    n_feat = flat_in.shape[1]
     spatial = n_h * n_w
-    if n_feat > max_points:
-        g = torch.Generator().manual_seed(seed)
-        idx = torch.randperm(n_feat, generator=g)[:max_points]
-    else:
-        idx = torch.arange(n_feat)
+    idx = _sample_feature_indices(flat_in.shape[1], max_points, seed)
     tracked_in = flat_in[:, idx]
     tracked_out = flat_out[:, idx]
     channels = (idx // spatial).numpy()
@@ -1207,7 +1353,6 @@ def scatter_io_animation(
 
     for d in range(n):
         fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
-        ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0)
         ax.axhline(0.0, color="0.85", lw=1, zorder=0)
         sc = ax.scatter(
             tracked_in[d].numpy(),
@@ -1239,7 +1384,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
     run_name = res["name"]
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
     map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", "h_CH", "x_CH")]
-    scatter_kinds = [k for k in VIDEO_MAPS if k in ("scatter_x", "scatter_h")]
+    scatter_kinds = [k for k in VIDEO_MAPS if k in ("scatter_ch_x", "scatter_ch_h", "scatter_h")]
 
     for kind in channel_kinds:
         mean_map = res[f"mean_{kind}"]
@@ -1275,17 +1420,22 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
         print(f"  {kind}: {[p.name for p in written.values()]}")
 
     for kind in scatter_kinds:
-        if kind == "scatter_x":
-            x = res["mean_x"]
-            x0 = x[:1].expand_as(x)
-            written = scatter_io_animation(
-                x0,
-                x,
+        if kind == "scatter_ch_x":
+            written = scatter_vs_channel_animation(
+                res["mean_x"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
                 out_stem=run_dir / kind,
-                xlabel="x_0",
                 ylabel="x_d",
+                fps=fps,
+            )
+        elif kind == "scatter_ch_h":
+            written = scatter_vs_channel_animation(
+                res["mean_h"],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
                 fps=fps,
             )
         else:
@@ -1296,7 +1446,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 frame_dir=run_dir / "frames" / kind,
                 out_stem=run_dir / kind,
                 xlabel="x_d",
-                ylabel=r"$f(x_d)=h_d$",
+                ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
                 fps=fps,
             )
         print(f"  {kind}: {[p.name for p in written.values()]}")
@@ -1364,18 +1514,37 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     write_videos(res, channels, run_dir)
 
     # Static overlays (always). Animations are gated by VIDEO_MAPS via write_videos.
-    x = res["mean_x"]
-    scatter_io(
-        x[:1].expand_as(x),
-        x,
-        title=f"{name} | {KIND_TITLES['scatter_x']}",
-        path=run_dir / "scatter_x.png",
-        xlabel="x_0",
+    scatter_vs_channel(
+        res["mean_x"],
+        title=f"{name} | {KIND_TITLES['scatter_ch_x']}",
+        path=run_dir / "scatter_ch_x.png",
         ylabel="x_d",
         channel=SCATTER_CHANNEL,
-        draw_y_equals_x=True,
+    )
+    scatter_vs_channel(
+        res["mean_h"],
+        title=f"{name} | {KIND_TITLES['scatter_ch_h']}",
+        path=run_dir / "scatter_ch_h.png",
+        ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
+        channel=SCATTER_CHANNEL,
     )
     scatter_residual_field(res, path=run_dir / "scatter_h.png", channel=SCATTER_CHANNEL)
+    spaghetti_trajectories(
+        res["mean_x"],
+        title=f"{name} | spaghetti x_d(t)",
+        path=run_dir / "spaghetti_x.png",
+        ylabel="x_d",
+        euler_step=res["euler_step"],
+        channel=SCATTER_CHANNEL,
+    )
+    spaghetti_trajectories(
+        res["mean_h"],
+        title=f"{name} | spaghetti h_d(t)",
+        path=run_dir / "spaghetti_h.png",
+        ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
+        euler_step=res["euler_step"],
+        channel=SCATTER_CHANNEL,
+    )
     print(f"done -> {run_dir}")
 
     # Drop heavy maps before returning a light copy for overlay.
