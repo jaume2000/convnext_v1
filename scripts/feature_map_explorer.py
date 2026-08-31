@@ -90,10 +90,12 @@ GIF_MAX_FRAMES = 9999
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
 KEEP_FRAMES = True
 FIGSIZE, DPI = (4.4, 4.2), 100
-# C×H: channels on x (vertical stripes), H on y. Scale pixels so both axes are readable.
-CH_PX_PER_CHANNEL = 3
-CH_PX_PER_H = 16
-CH_DPI = 120
+# C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
+CH_PX_PER_CELL = 8
+CH_DPI = 100
+CH_CBAR_PX = 40
+CH_TITLE_PX = 32
+CH_GRID_PX_PER_CELL = 3  # smaller cells for multi-panel grids
 
 KIND_TITLES = {
     "h": "h_d (block output, no residual)",
@@ -297,11 +299,60 @@ def ch_cut(maps: torch.Tensor) -> torch.Tensor:
     return maps[..., w].permute(0, 2, 1)
 
 
-def ch_figsize(n_h: int, n_c: int) -> tuple[float, float]:
-    """Wide canvas sized from data (≈384×14), with extra vertical stretch for H rows."""
-    width = (n_c * CH_PX_PER_CHANNEL) / CH_DPI + 0.8
-    height = (n_h * CH_PX_PER_H) / CH_DPI + 1.8  # title + horizontal colorbar
-    return width, height
+def ch_canvas_px(n_h: int, n_c: int, *, px_per_cell: int) -> tuple[int, int]:
+    """Figure size in pixels: data is n_c×n_h cells, plus title and bottom colorbar."""
+    data_w = n_c * px_per_cell
+    data_h = n_h * px_per_cell
+    return data_w, data_h + CH_CBAR_PX + CH_TITLE_PX
+
+
+def render_ch_frame(
+    frame: torch.Tensor,
+    path: Path,
+    *,
+    title: str,
+    frame_label: str,
+    style: dict,
+    px_per_cell: int = CH_PX_PER_CELL,
+) -> None:
+    """Save a C×H slice with native map aspect (channels = vertical columns)."""
+    n_h, n_c = frame.shape
+    fig_w_px, fig_h_px = ch_canvas_px(n_h, n_c, px_per_cell=px_per_cell)
+    data_h_px = n_h * px_per_cell
+
+    fig = plt.figure(figsize=(fig_w_px / CH_DPI, fig_h_px / CH_DPI), dpi=CH_DPI)
+    fig.text(
+        0.5,
+        1 - CH_TITLE_PX / (2 * fig_h_px),
+        f"{title}\n{frame_label}",
+        ha="center",
+        va="center",
+        fontsize=9,
+    )
+
+    ax_bottom = CH_CBAR_PX / fig_h_px
+    ax_height = data_h_px / fig_h_px
+    ax = fig.add_axes([0, ax_bottom, 1, ax_height])
+    im = ax.imshow(
+        frame.numpy(),
+        aspect="equal",
+        origin="lower",
+        interpolation="nearest",
+        **style,
+    )
+    ax.set_xlim(-0.5, n_c - 0.5)
+    ax.set_ylim(-0.5, n_h - 0.5)
+    ax.set_xlabel("channel", fontsize=8)
+    ax.set_ylabel("H", fontsize=8)
+    step = max(1, n_c // 8)
+    ax.set_xticks(list(range(0, n_c, step)) + ([n_c - 1] if (n_c - 1) % step else []))
+    ax.set_yticks(range(n_h))
+
+    cax_h = (CH_CBAR_PX * 0.5) / fig_h_px
+    cax = fig.add_axes([0.06, 0.03, 0.88, cax_h])
+    fig.colorbar(im, cax=cax, orientation="horizontal")
+    fig.savefig(path, pad_inches=0.05)
+    plt.close(fig)
 
 
 def render_frames(maps: torch.Tensor, out_dir: Path, *, title: str, kind: str) -> None:
@@ -310,34 +361,25 @@ def render_frames(maps: torch.Tensor, out_dir: Path, *, title: str, kind: str) -
     out_dir.mkdir(parents=True)
     style = draw_style(maps, kind)
     is_ch = kind.endswith("_CH")
-    ch_fig = ch_figsize(maps.shape[1], maps.shape[2]) if is_ch else None
+    last = len(maps) - 1
     for d, frame in enumerate(maps):
-        if is_ch:
-            fig, ax = plt.subplots(figsize=ch_fig, dpi=CH_DPI)
-        else:
-            fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, layout="constrained")
-        im = ax.imshow(
-            frame.numpy(),
-            interpolation="nearest",
-            aspect="auto",
-            origin="lower",
-            **style,
-        )
-        last = len(maps) - 1
         frame_label = (
             f"d = {d} → {d + 1}  ({d} / {last})" if is_pair_kind(kind) else f"d = {d} / {last}"
         )
-        ax.set_title(f"{title}\n{frame_label}", fontsize=10)
         if is_ch:
-            n_h, n_c = frame.shape
-            ax.set_xlabel("channel")
-            ax.set_ylabel("H")
-            ax.set_xlim(-0.5, n_c - 0.5)
-            ax.set_ylim(-0.5, n_h - 0.5)
-            fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.05, pad=0.18)
-        else:
-            ax.axis("off")
-            fig.colorbar(im, ax=ax, fraction=0.046)
+            render_ch_frame(
+                frame,
+                out_dir / f"frame_{d:04d}.png",
+                title=title,
+                frame_label=frame_label,
+                style=style,
+            )
+            continue
+        fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, layout="constrained")
+        im = ax.imshow(frame.numpy(), interpolation="nearest", aspect="auto", origin="lower", **style)
+        ax.set_title(f"{title}\n{frame_label}", fontsize=10)
+        ax.axis("off")
+        fig.colorbar(im, ax=ax, fraction=0.046)
         fig.savefig(out_dir / f"frame_{d:04d}.png")
         plt.close(fig)
 
@@ -349,8 +391,11 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
     style = draw_style(maps, kind)
     is_ch = kind.endswith("_CH")
     if is_ch:
-        fw, fh = ch_figsize(maps.shape[1], maps.shape[2])
-        figsize = (fw * min(ncols, 2), fh * nrows)
+        n_h, n_c = maps.shape[1], maps.shape[2]
+        cell = CH_GRID_PX_PER_CELL
+        panel_w = n_c * cell / CH_DPI + 0.6
+        panel_h = n_h * cell / CH_DPI + 0.9
+        figsize = (panel_w * ncols, panel_h * nrows)
     else:
         figsize = (2.1 * ncols, 2.3 * nrows)
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, layout="constrained")
@@ -358,17 +403,18 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
         ax.axis("off")
     im = None
     for d, (ax, frame) in enumerate(zip(axes.flat, maps)):
+        aspect = "equal" if is_ch else "auto"
         im = ax.imshow(
-            frame.numpy(), interpolation="nearest", aspect="auto", origin="lower", **style
+            frame.numpy(), interpolation="nearest", aspect=aspect, origin="lower", **style
         )
         if is_ch:
             ax.set_xlabel("ch", fontsize=7)
             ax.set_ylabel("H", fontsize=7)
         ax.set_title(f"d={d}→{d + 1}" if is_pair_kind(kind) else f"d={d}", fontsize=9)
     if im is not None:
-        fig.colorbar(im, ax=axes, fraction=0.02)
+        fig.colorbar(im, ax=axes, orientation="horizontal", fraction=0.03, pad=0.04)
     fig.suptitle(title)
-    fig.savefig(path, dpi=140)
+    fig.savefig(path, dpi=CH_DPI if is_ch else 140)
     plt.close(fig)
 
 
