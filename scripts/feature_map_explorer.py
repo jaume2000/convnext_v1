@@ -58,6 +58,7 @@ FPS = 10.0
 # Edit this list for the experiments to run on Leonardo.
 # Optional per-run field: ignore_top_k_channels (default = IGNORE_TOP_K_CHANNELS below).
 RUNS: list[dict] = [
+    {"name": "D100_rk1_c7_n50_bs16_no_ignore", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 0},
     {"name": "D100_rk1_c7_n50_bs16", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
     {"name": "D100_rk1_c7_n1_bs1", "D": 100, "method": None, "class_id": 7, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
     {"name": "D100_rk1_c207_n50_bs16", "D": 100, "method": None, "class_id": 207, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
