@@ -79,7 +79,7 @@ CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
 # Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
 IGNORE_TOP_K_CHANNELS = 1
-VIDEO_MAPS = ["scatter_x", "scatter_h"]
+VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH", "scatter_x", "scatter_h"]
 
 CMAP_X = "viridis"
 CMAP_H = "RdBu_r"
@@ -92,6 +92,8 @@ SCATTER_MAX_POINTS = 99999999
 # Animation: sample N features once, track the same indices across depth.
 SCATTER_ANIM_MAX_POINTS = 8000
 SCATTER_ANIM_SEED = 0
+# turbo: high local contrast (nearby channels look distinct); better than viridis here.
+SCATTER_ANIM_CMAP = "turbo"
 # Building a GIF loads every frame into RAM — skip when D is large.
 GIF_MAX_FRAMES = 9999
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
@@ -845,13 +847,14 @@ def scatter_io_animation(
     """Animate (input[d], output[d]) for a fixed random feature subset across depth.
 
     Samples feature indices once, then draws the same points at every depth so the
-    cloud can be watched moving.
+    cloud can be watched moving. Colour encodes channel index (stable over depth).
     """
-    assert inputs.shape == outputs.shape
-    n = inputs.shape[0]
+    assert inputs.shape == outputs.shape and inputs.ndim == 4
+    n, n_c, n_h, n_w = inputs.shape
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
     n_feat = flat_in.shape[1]
+    spatial = n_h * n_w
     if n_feat > max_points:
         g = torch.Generator().manual_seed(seed)
         idx = torch.randperm(n_feat, generator=g)[:max_points]
@@ -859,6 +862,7 @@ def scatter_io_animation(
         idx = torch.arange(n_feat)
     tracked_in = flat_in[:, idx]
     tracked_out = flat_out[:, idx]
+    channels = (idx // spatial).numpy()
     lo = min(tracked_in.min().item(), tracked_out.min().item())
     hi = max(tracked_in.max().item(), tracked_out.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
@@ -868,28 +872,27 @@ def scatter_io_animation(
         shutil.rmtree(frame_dir)
     frame_dir.mkdir(parents=True)
 
-    # Fixed colour per sampled slot so individual points are easier to follow.
-    n_pts = idx.numel()
-    point_colors = plt.cm.viridis(
-        (torch.arange(n_pts).float() / max(n_pts - 1, 1)).numpy() if n_pts > 1 else [0.5]
-    )
     for d in range(n):
         fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
         ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0)
         ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-        ax.scatter(
+        sc = ax.scatter(
             tracked_in[d].numpy(),
             tracked_out[d].numpy(),
             s=8,
-            alpha=0.45,
-            c=point_colors,
+            alpha=0.55,
+            c=channels,
+            cmap=SCATTER_ANIM_CMAP,
+            vmin=0,
+            vmax=max(n_c - 1, 1),
             linewidths=0,
         )
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.set_title(f"{title}\nd={d}  ({idx.numel()} features, fixed sample)")
+        ax.set_title(f"{title}\nd={d}  ({idx.numel()} features, colour=channel)")
         ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.3)
         fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
