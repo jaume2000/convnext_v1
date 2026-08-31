@@ -52,6 +52,8 @@ mkdir -p "${PROJECT_ROOT}/logs"
 module purge
 module load profile/deeplrn
 module load cineca-ai
+# Optional: many Cineca images ship ffmpeg as a module; ignore if absent.
+module load ffmpeg 2>/dev/null || true
 
 VENV_PATH="${VENV_PATH:-$HOME/venvs/convnext}"
 VENV_PATH="${VENV_PATH/#\~/$HOME}"

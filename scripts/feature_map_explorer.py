@@ -328,55 +328,106 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
     plt.close(fig)
 
 
-def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -> dict[str, Path]:
-    """mp4 via ffmpeg (streams from disk). GIF only when n_frames is small."""
-    written: dict[str, Path] = {}
-    if shutil.which("ffmpeg"):
-        mp4 = out_stem.with_suffix(".mp4")
+def _load_rgb_frames(frame_dir: Path) -> list[Image.Image]:
+    frames = sorted(frame_dir.glob("frame_*.png"))
+    images = [Image.open(p).convert("RGB") for p in frames]
+    if len({im.size for im in images}) <= 1:
+        return images
+    width = max(im.width for im in images)
+    height = max(im.height for im in images)
+    padded = []
+    for im in images:
+        canvas = Image.new("RGB", (width, height), "white")
+        canvas.paste(im, ((width - im.width) // 2, (height - im.height) // 2))
+        im.close()
+        padded.append(canvas)
+    return padded
+
+
+def _write_mp4_ffmpeg(frame_dir: Path, mp4: Path, fps: float) -> bool:
+    if not shutil.which("ffmpeg"):
+        return False
+    # Prefer libx264; fall back to mpeg4 when the build has no x264 (common on HPC images).
+    for codec_args in (
+        ["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        ["-c:v", "mpeg4", "-q:v", "5"],
+    ):
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-framerate", str(fps),
                 "-i", str(frame_dir / "frame_%04d.png"),
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                *codec_args,
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 str(mp4),
             ],
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            written["mp4"] = mp4
-        else:
-            print(f"  ffmpeg failed: {proc.stderr.strip()[:300]}")
+        if proc.returncode == 0 and mp4.is_file():
+            return True
+        print(f"  ffmpeg {' '.join(codec_args)} failed: {proc.stderr.strip()[:200]}")
+    return False
 
-    if n_frames <= GIF_MAX_FRAMES:
-        frames = sorted(frame_dir.glob("frame_*.png"))
-        images = [Image.open(p).convert("RGB") for p in frames]
-        if len({im.size for im in images}) > 1:
-            width = max(im.width for im in images)
-            height = max(im.height for im in images)
-            padded = []
-            for im in images:
-                canvas = Image.new("RGB", (width, height), "white")
-                canvas.paste(im, ((width - im.width) // 2, (height - im.height) // 2))
-                padded.append(canvas)
-            images = padded
+
+def _write_mp4_opencv(frame_dir: Path, mp4: Path, fps: float) -> bool:
+    try:
+        import cv2
+    except ImportError:
+        return False
+    frames = sorted(frame_dir.glob("frame_*.png"))
+    if not frames:
+        return False
+    first = cv2.imread(str(frames[0]))
+    if first is None:
+        return False
+    h, w = first.shape[:2]
+    w -= w % 2
+    h -= h % 2
+    # mp4v is widely available; avc1/H264 often is not in OpenCV builds.
+    writer = cv2.VideoWriter(str(mp4), cv2.VideoWriter_fourcc(*"mp4v"), max(fps, 1e-3), (w, h))
+    if not writer.isOpened():
+        return False
+    for path in frames:
+        img = cv2.imread(str(path))
+        if img is None:
+            continue
+        if img.shape[1] != w or img.shape[0] != h:
+            img = cv2.resize(img, (w, h))
+        writer.write(img)
+    writer.release()
+    return mp4.is_file() and mp4.stat().st_size > 0
+
+
+def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -> dict[str, Path]:
+    """Write mp4 (ffmpeg or OpenCV) and/or gif. Never delete frames if nothing was written."""
+    written: dict[str, Path] = {}
+    mp4 = out_stem.with_suffix(".mp4")
+    if _write_mp4_ffmpeg(frame_dir, mp4, fps) or _write_mp4_opencv(frame_dir, mp4, fps):
+        written["mp4"] = mp4
+
+    # GIF loads every frame in RAM. Prefer mp4 when D is large; if mp4 failed, always
+    # write a gif anyway so the run still produces a viewable animation.
+    want_gif = n_frames <= GIF_MAX_FRAMES or "mp4" not in written
+    if want_gif:
+        images = _load_rgb_frames(frame_dir)
         gif = out_stem.with_suffix(".gif")
         images[0].save(
             gif,
             save_all=True,
             append_images=images[1:],
-            duration=max(1, int(round(1000 / fps))),
+            duration=max(1, int(round(1000 / max(fps, 1e-3)))),
             loop=0,
         )
         written["gif"] = gif
         for im in images:
             im.close()
-    elif "mp4" not in written:
-        print(f"  skip gif (n_frames={n_frames} > {GIF_MAX_FRAMES}) and no mp4")
+        if n_frames > GIF_MAX_FRAMES and "mp4" not in written:
+            print(f"  no ffmpeg/opencv mp4 — wrote gif with {n_frames} frames instead")
 
-    if not KEEP_FRAMES:
+    if not written:
+        print(f"  WARNING: no video written for {out_stem.name}; keeping frames in {frame_dir}")
+    elif not KEEP_FRAMES:
         shutil.rmtree(frame_dir, ignore_errors=True)
     return written
 
