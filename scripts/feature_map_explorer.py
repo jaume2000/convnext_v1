@@ -19,7 +19,6 @@ import argparse
 import gc
 import json
 import os
-from pickle import TRUE
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -51,8 +51,9 @@ OUT_DIR = _REPO_ROOT / "outputs" / "featureMaps"
 SPLIT = "validation"
 IMAGE_INDICES = [0, 17, 4242]
 CLASS_ID: int | None = 207
-MAX_IMAGES_PER_CLASS: int | None = 16
-BATCH_SIZE = 16
+# Default N images to average curves over (mean ± std).
+MAX_IMAGES_PER_CLASS: int | None = 100
+BATCH_SIZE = 8
 FPS = 10.0
 
 # Edit this list for the experiments to run on Leonardo.
@@ -89,6 +90,10 @@ SHARED_SCALE = True
 SAVE_TENSORS = False
 GRID_MAX_FRAMES = 36
 SCATTER_MAX_POINTS = 99999999
+# None = all channels in static scatter; int = that channel only.
+SCATTER_CHANNEL: int | None = None
+# After all RUNS, write a combined residual scatter coloured/legended by D.
+SCATTER_OVERLAY_BY_D = True
 # Animation: sample N features once, track the same indices across depth.
 SCATTER_ANIM_MAX_POINTS = 8000
 SCATTER_ANIM_SEED = 0
@@ -120,7 +125,7 @@ KIND_TITLES = {
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
     "scatter_x": "X cumulative: x_d → x_{d+1}",
-    "scatter_h": "residual: x_d → h_d = f(x_d)",
+    "scatter_h": "residual field: x_d → f(x_d) = h_d / ES",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -186,16 +191,50 @@ def rk_step(f, x, h, method, k1=None):
     raise ValueError(f"Unknown integration method: {method!r}")
 
 
+def participation_ratio(singular_values: torch.Tensor) -> float:
+    """PR = (sum s_i^2)^2 / sum s_i^4 over singular values."""
+    s2 = singular_values.double().clamp_min(0.0).square()
+    num = s2.sum().square()
+    den = s2.square().sum().clamp_min(1e-30)
+    return (num / den).item()
+
+
+def svd_participation_ratio(matrix: torch.Tensor) -> float:
+    """Thin SVD participation ratio of a 2D matrix."""
+    if matrix.numel() == 0 or min(matrix.shape) == 0:
+        return float("nan")
+    # float32 SVD is enough for a scalar PR; keep matrix on CPU.
+    _, s, _ = torch.linalg.svd(matrix.float().cpu(), full_matrices=False)
+    return participation_ratio(s)
+
+
 @torch.no_grad()
 def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, batch_size, dataset):
+    """Integrate the shared block and collect per-image dynamics + mean maps.
+
+    Stored residual maps keep the existing convention h = block(x) - x (no ES).
+    Derived field used in plots/metrics: f = h / ES.
+    """
     method = method.upper() if isinstance(method, str) else method
     n = len(indices)
     w = 1.0 / n
+    es = float(euler_step)
     mean_x = mean_h = cos_map_h = cos_map_x = norm_map_h = l2_map_h = None
-    zeros = lambda k: torch.zeros(k, dtype=torch.float64, device=device)
-    norm_x, norm_h = zeros(D + 1), zeros(D + 1)
-    cos_h, l2_h, cos_x, l2_x = zeros(D), zeros(D), zeros(D), zeros(D)
-    cos_h_spatial, cos_x_spatial = zeros(D), zeros(D)
+
+    # Per-image series (filled in index order).
+    norm_h_i = torch.zeros(n, D + 1, dtype=torch.float64)
+    norm_x_i = torch.zeros(n, D + 1, dtype=torch.float64)
+    cos_flat_i = torch.zeros(n, D, dtype=torch.float64)  # 1 - cos(h_d, h_{d+1}) flat
+    cos_spatial_i = torch.zeros(n, D, dtype=torch.float64)
+    cos_x_flat_i = torch.zeros(n, D, dtype=torch.float64)
+    cos_x_spatial_i = torch.zeros(n, D, dtype=torch.float64)
+    omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES
+    align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
+    rect_L_i = torch.zeros(n, dtype=torch.float64)
+    rect_N_i = torch.zeros(n, dtype=torch.float64)
+    rect_R_i = torch.zeros(n, dtype=torch.float64)
+    pr_depth_i = torch.zeros(n, dtype=torch.float64)
+    pr_spatial_i = torch.zeros(n, dtype=torch.float64)
 
     def f(y):
         return shared_block(y) - y
@@ -204,9 +243,11 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
         return torch.stack([dataset[i][0] for i in idxs])
 
     starts = range(0, n, batch_size)
-    desc = f"D={D} h={euler_step:.4g} m={method or 'RK1'}"
+    desc = f"D={D} h={es:.4g} m={method or 'RK1'}"
     for start in tqdm(starts, desc=desc, leave=True):
-        batch = load_batch(indices[start : start + batch_size]).to(device, non_blocking=True)
+        batch_idx = indices[start : start + batch_size]
+        batch = load_batch(batch_idx).to(device, non_blocking=True)
+        bsz = batch.shape[0]
         x = model.stage2(model.stage1(model.stem(batch)))
         if mean_x is None:
             mean_x = torch.zeros((D + 1, *x.shape[1:]), device=device)
@@ -215,58 +256,153 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             cos_map_x = torch.zeros_like(cos_map_h)
             norm_map_h = torch.zeros((D + 1, *x.shape[2:]), device=device)
             l2_map_h = torch.zeros((D, *x.shape[2:]), device=device)
+
+        # Per-image residual trajectory for SVD / rectitude: [B, D+1, C, H, W] is heavy;
+        # keep flattened [B, D+1, dim] on CPU.
         h = f(x)
+        x0 = x.detach()
+        h0_flat = h.flatten(1).detach()
+        H_rows: list[torch.Tensor] = []
+        path_len = torch.zeros(bsz, dtype=torch.float64, device=device)
+
         for d in range(D + 1):
             mean_x[d] += w * x.sum(0)
             mean_h[d] += w * h.sum(0)
             norm_map_h[d] += w * h.norm(dim=1).sum(0)
-            norm_x[d] += w * x.flatten(1).norm(dim=1).double().sum()
-            norm_h[d] += w * h.flatten(1).norm(dim=1).double().sum()
+
+            h_flat = h.flatten(1)
+            x_flat = x.flatten(1)
+            n_h = h_flat.norm(dim=1)
+            n_x = x_flat.norm(dim=1)
+            norm_h_i[start : start + bsz, d] = n_h.double().cpu()
+            norm_x_i[start : start + bsz, d] = n_x.double().cpu()
+            align_h0_i[start : start + bsz, d] = F.cosine_similarity(h0_flat, h_flat, dim=1).double().cpu()
+            H_rows.append(h_flat.detach().cpu())
+            # L = ES * sum ||f_d|| with f = h/ES → sum ||h_d|| over applied steps.
+            if d < D:
+                path_len = path_len + n_h.double()
+
             if d == D:
                 break
+
             x_next = rk_step(f, x, euler_step, method, k1=h)
             h_next = f(x_next)
-            cos_h[d] += w * (1 - F.cosine_similarity(h.flatten(1), h_next.flatten(1), dim=1)).double().sum()
-            l2_h[d] += w * (h - h_next).flatten(1).norm(dim=1).double().sum()
-            cos_x[d] += w * (1 - F.cosine_similarity(x.flatten(1), x_next.flatten(1), dim=1)).double().sum()
-            l2_x[d] += w * (x - x_next).flatten(1).norm(dim=1).double().sum()
-            loc_h = 1 - F.cosine_similarity(h, h_next, dim=1)
-            loc_x = 1 - F.cosine_similarity(x, x_next, dim=1)
+            h_next_flat = h_next.flatten(1)
+            x_next_flat = x_next.flatten(1)
+
+            cos_hh = F.cosine_similarity(h_flat, h_next_flat, dim=1).clamp(-1.0, 1.0)
+            cos_flat_i[start : start + bsz, d] = (1.0 - cos_hh).double().cpu()
+            omega_i[start : start + bsz, d] = torch.arccos(cos_hh).double().cpu() / max(es, 1e-12)
+            cos_x_flat_i[start : start + bsz, d] = (
+                1.0 - F.cosine_similarity(x_flat, x_next_flat, dim=1)
+            ).double().cpu()
+
+            loc_h = 1.0 - F.cosine_similarity(h, h_next, dim=1)
+            loc_x = 1.0 - F.cosine_similarity(x, x_next, dim=1)
             cos_map_h[d] += w * loc_h.sum(0)
             cos_map_x[d] += w * loc_x.sum(0)
-            cos_h_spatial[d] += w * loc_h.mean(dim=(1, 2)).double().sum()
-            cos_x_spatial[d] += w * loc_x.mean(dim=(1, 2)).double().sum()
+            cos_spatial_i[start : start + bsz, d] = loc_h.mean(dim=(1, 2)).double().cpu()
+            cos_x_spatial_i[start : start + bsz, d] = loc_x.mean(dim=(1, 2)).double().cpu()
             l2_map_h[d] += w * (h - h_next).norm(dim=1).sum(0)
             x, h = x_next, h_next
-        del batch, x, h
+
+        # Rectitude: L = sum_d ||h_d|| (= ES * sum ||f_d||), N = ||x_D - x_0||, R = N/L.
+        disp = (x - x0).flatten(1).norm(dim=1).double()
+        rect_L_i[start : start + bsz] = path_len.cpu()
+        rect_N_i[start : start + bsz] = disp.cpu()
+        rect_R_i[start : start + bsz] = (disp / path_len.clamp_min(1e-30)).cpu()
+
+        # SVD PR on H_i shaped (D, dim) using h_0..h_{D-1}, and mid-step (H*W, C).
+        H_stack = torch.stack(H_rows[:D], dim=1)  # [B, D, dim]
+        mid = D // 2
+        for bi in range(bsz):
+            pr_depth_i[start + bi] = svd_participation_ratio(H_stack[bi])
+            h_mid = H_rows[mid][bi].reshape(x.shape[1], -1).T  # (H*W, C)
+            pr_spatial_i[start + bi] = svd_participation_ratio(h_mid)
+
+        del batch, x, h, x0, H_rows, H_stack
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
+    def mean_std(arr: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+        return arr.mean(0).numpy(), arr.std(0, unbiased=False).numpy()
+
     depths = torch.arange(D + 1)
+    norm_h_mean, norm_h_std = mean_std(norm_h_i)
+    norm_x_mean, norm_x_std = mean_std(norm_x_i)
+    # f = h / ES
+    norm_f_mean, norm_f_std = norm_h_mean / max(es, 1e-12), norm_h_std / max(es, 1e-12)
+    norm_f_over_x_mean = norm_f_mean / np.clip(norm_x_mean, 1e-30, None)
+    # delta method-ish std for ratio: skip exact; use std of per-image ratios.
+    norm_f_over_x_i = (norm_h_i / max(es, 1e-12)) / norm_x_i.clamp_min(1e-30)
+    norm_f_over_x_std = norm_f_over_x_i.std(0, unbiased=False).numpy()
+
+    cos_flat_mean, cos_flat_std = mean_std(cos_flat_i)
+    cos_spatial_mean, cos_spatial_std = mean_std(cos_spatial_i)
+    omega_mean, omega_std = mean_std(omega_i)
+    align_mean, align_std = mean_std(align_h0_i)
+
+    # Correlation between flat and spatial 1-cos series (on the mean curves).
+    if D >= 2 and cos_flat_mean.std() > 0 and cos_spatial_mean.std() > 0:
+        cos_flat_spatial_corr = float(np.corrcoef(cos_flat_mean, cos_spatial_mean)[0, 1])
+    else:
+        cos_flat_spatial_corr = float("nan")
+
     norms = pd.DataFrame(
         {
             "d": depths.numpy(),
-            "t": (depths * euler_step).numpy(),
-            "norm_h": norm_h.cpu().numpy(),
-            "norm_x": norm_x.cpu().numpy(),
+            "t": (depths * es).numpy(),
+            "norm_h": norm_h_mean,
+            "norm_h_std": norm_h_std,
+            "norm_x": norm_x_mean,
+            "norm_x_std": norm_x_std,
+            "norm_f": norm_f_mean,
+            "norm_f_std": norm_f_std,
+            "norm_f_over_norm_x": norm_f_over_x_mean,
+            "norm_f_over_norm_x_std": norm_f_over_x_std,
+            "cos_h0_hd": align_mean,
+            "cos_h0_hd_std": align_std,
         }
     )
-    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"]
+    # Keep legacy column name used elsewhere.
+    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"].clip(lower=1e-30)
+
     pairs = pd.DataFrame(
         {
             "d": torch.arange(D).numpy(),
             "pair": [f"{d}->{d + 1}" for d in range(D)],
-            "cos_dist_h": cos_h.cpu().numpy(),
-            "cos_dist_h_spatial": cos_h_spatial.cpu().numpy(),
-            "l2_h": l2_h.cpu().numpy(),
-            "cos_dist_x": cos_x.cpu().numpy(),
-            "cos_dist_x_spatial": cos_x_spatial.cpu().numpy(),
-            "l2_x": l2_x.cpu().numpy(),
+            "t": (torch.arange(D).numpy() * es),
+            "cos_dist_h": cos_flat_mean,
+            "cos_dist_h_std": cos_flat_std,
+            "cos_dist_h_spatial": cos_spatial_mean,
+            "cos_dist_h_spatial_std": cos_spatial_std,
+            "omega_h": omega_mean,
+            "omega_h_std": omega_std,
+            "cos_dist_x": mean_std(cos_x_flat_i)[0],
+            "cos_dist_x_spatial": mean_std(cos_x_spatial_i)[0],
         }
     )
+
+    scalars = pd.DataFrame(
+        {
+            "image_index": list(indices),
+            "L": rect_L_i.numpy(),
+            "N": rect_N_i.numpy(),
+            "R": rect_R_i.numpy(),
+            "PR_depth": pr_depth_i.numpy(),
+            "PR_spatial_mid": pr_spatial_i.numpy(),
+        }
+    )
+
+    # PR on the mean residual trajectory (D, dim) and mid-step (HW, C).
+    H_mean = mean_h[:D].reshape(D, -1)
+    pr_depth_mean_traj = svd_participation_ratio(H_mean)
+    c, hh, ww = mean_h.shape[1:]
+    pr_spatial_mean_traj = svd_participation_ratio(mean_h[D // 2].reshape(c, -1).T)
+
     return {
         "D": D,
-        "euler_step": euler_step,
+        "euler_step": es,
         "method": method,
         "n_images": n,
         "mean_x": mean_x.cpu(),
@@ -277,6 +413,18 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
         "l2_h": l2_map_h.cpu(),
         "norms": norms,
         "pairs": pairs,
+        "scalars": scalars,
+        "cos_flat_spatial_corr": cos_flat_spatial_corr,
+        "rectitude_mean": float(rect_R_i.mean()),
+        "rectitude_std": float(rect_R_i.std(unbiased=False)),
+        "L_mean": float(rect_L_i.mean()),
+        "N_mean": float(rect_N_i.mean()),
+        "PR_depth_mean": float(pr_depth_i.mean()),
+        "PR_depth_std": float(pr_depth_i.std(unbiased=False)),
+        "PR_spatial_mean": float(pr_spatial_i.mean()),
+        "PR_spatial_std": float(pr_spatial_i.std(unbiased=False)),
+        "PR_depth_on_mean_traj": pr_depth_mean_traj,
+        "PR_spatial_on_mean_traj": pr_spatial_mean_traj,
     }
 
 
@@ -330,51 +478,72 @@ def spatial_maps_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor) -> dict[
 def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Norm / pair tables from mean maps (used after channel masking)."""
     D = mean_x.shape[0] - 1
+    es = float(euler_step)
     depths = torch.arange(D + 1)
     norm_h = mean_h.flatten(1).norm(dim=1)
     norm_x = mean_x.flatten(1).norm(dim=1)
+    norm_f = norm_h / max(es, 1e-12)
+    align = torch.stack(
+        [F.cosine_similarity(mean_h[0].flatten(), mean_h[d].flatten(), dim=0) for d in range(D + 1)]
+    )
     norms = pd.DataFrame(
         {
             "d": depths.numpy(),
-            "t": (depths * euler_step).numpy(),
+            "t": (depths * es).numpy(),
             "norm_h": norm_h.numpy(),
+            "norm_h_std": 0.0,
             "norm_x": norm_x.numpy(),
+            "norm_x_std": 0.0,
+            "norm_f": norm_f.numpy(),
+            "norm_f_std": 0.0,
+            "norm_f_over_norm_x": (norm_f / norm_x.clamp_min(1e-30)).numpy(),
+            "norm_f_over_norm_x_std": 0.0,
+            "cos_h0_hd": align.numpy(),
+            "cos_h0_hd_std": 0.0,
         }
     )
-    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"]
+    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"].clip(lower=1e-30)
 
     cos_h = []
+    cos_spatial = []
+    omega = []
     cos_x = []
-    l2_h = []
-    l2_x = []
-    cos_h_spatial = []
     cos_x_spatial = []
     for d in range(D):
-        cos_h.append(1 - F.cosine_similarity(mean_h[d].flatten(), mean_h[d + 1].flatten(), dim=0).item())
-        cos_x.append(1 - F.cosine_similarity(mean_x[d].flatten(), mean_x[d + 1].flatten(), dim=0).item())
-        l2_h.append((mean_h[d] - mean_h[d + 1]).norm().item())
-        l2_x.append((mean_x[d] - mean_x[d + 1]).norm().item())
+        c = F.cosine_similarity(mean_h[d].flatten(), mean_h[d + 1].flatten(), dim=0).clamp(-1, 1)
+        cos_h.append((1 - c).item())
+        omega.append((torch.arccos(c) / max(es, 1e-12)).item())
+        cos_x.append(
+            (1 - F.cosine_similarity(mean_x[d].flatten(), mean_x[d + 1].flatten(), dim=0)).item()
+        )
         loc_h = 1 - F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0)
         loc_x = 1 - F.cosine_similarity(mean_x[d], mean_x[d + 1], dim=0)
-        cos_h_spatial.append(loc_h.mean().item())
+        cos_spatial.append(loc_h.mean().item())
         cos_x_spatial.append(loc_x.mean().item())
     pairs = pd.DataFrame(
         {
             "d": list(range(D)),
             "pair": [f"{d}->{d + 1}" for d in range(D)],
+            "t": [d * es for d in range(D)],
             "cos_dist_h": cos_h,
-            "cos_dist_h_spatial": cos_h_spatial,
-            "l2_h": l2_h,
+            "cos_dist_h_std": 0.0,
+            "cos_dist_h_spatial": cos_spatial,
+            "cos_dist_h_spatial_std": 0.0,
+            "omega_h": omega,
+            "omega_h_std": 0.0,
             "cos_dist_x": cos_x,
             "cos_dist_x_spatial": cos_x_spatial,
-            "l2_x": l2_x,
         }
     )
     return norms, pairs
 
 
 def apply_ignore_top_k_channels(res: dict, k: int) -> list[int]:
-    """Zero top-K channels (ranked on mean_h WxH norms) in mean maps; refresh derived fields."""
+    """Zero top-K channels (ranked on mean_h WxH norms) in mean maps; refresh video tensors.
+
+    Per-image curve tables (norms/pairs/scalars) are left unchanged — they were computed
+    on the full tensor before masking.
+    """
     if k <= 0:
         res["ignored_channels"] = []
         return []
@@ -382,9 +551,6 @@ def apply_ignore_top_k_channels(res: dict, k: int) -> list[int]:
     res["mean_h"] = zero_channels(res["mean_h"], ignored)
     res["mean_x"] = zero_channels(res["mean_x"], ignored)
     res.update(spatial_maps_from_means(res["mean_x"], res["mean_h"]))
-    res["norms"], res["pairs"] = tables_from_means(
-        res["mean_x"], res["mean_h"], euler_step=res["euler_step"]
-    )
     res["ignored_channels"] = ignored
     return ignored
 
@@ -714,6 +880,8 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
     spec = res["spec"]
     res["norms"].to_csv(run_dir / "table_norms.csv", index=False)
     res["pairs"].to_csv(run_dir / "table_pairs.csv", index=False)
+    if "scalars" in res:
+        res["scalars"].to_csv(run_dir / "table_scalars.csv", index=False)
     config = {
         "name": res["name"],
         "D": res["D"],
@@ -732,6 +900,18 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "n_auto_channels": N_AUTO_CHANNELS,
         "ignore_top_k_channels": spec["ignore_top_k_channels"],
         "ignored_channels": list(res.get("ignored_channels", [])),
+        "cos_flat_spatial_corr": res.get("cos_flat_spatial_corr"),
+        "rectitude_mean": res.get("rectitude_mean"),
+        "rectitude_std": res.get("rectitude_std"),
+        "L_mean": res.get("L_mean"),
+        "N_mean": res.get("N_mean"),
+        "PR_depth_mean": res.get("PR_depth_mean"),
+        "PR_depth_std": res.get("PR_depth_std"),
+        "PR_spatial_mean": res.get("PR_spatial_mean"),
+        "PR_spatial_std": res.get("PR_spatial_std"),
+        "PR_depth_on_mean_traj": res.get("PR_depth_on_mean_traj"),
+        "PR_spatial_on_mean_traj": res.get("PR_spatial_on_mean_traj"),
+        "scatter_channel": SCATTER_CHANNEL,
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     if SAVE_TENSORS:
@@ -748,41 +928,99 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         )
 
 
+def _plot_mean_std(ax, x, mean, std, *, label: str, **plot_kw):
+    mean = np.asarray(mean)
+    std = np.asarray(std)
+    ax.plot(x, mean, marker="o", ms=3, label=label, **plot_kw)
+    ax.fill_between(x, mean - std, mean + std, alpha=0.25)
+
+
 def save_metric_plots(res: dict, run_dir: Path) -> None:
     norms, pairs = res["norms"], res["pairs"]
-    t_pair = pairs["d"] * res["euler_step"]
-    label = f"{res['name']} (D={res['D']}, {res['method'] or 'RK1'})"
+    es = res["euler_step"]
+    label = f"{res['name']} (D={res['D']}, n={res['n_images']})"
+    t_state = norms["t"]
+    t_pair = pairs["t"] if "t" in pairs.columns else pairs["d"] * es
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), layout="constrained")
-    axes[0, 0].plot(norms["t"], norms["norm_h"], marker="o", ms=3, label=label)
-    axes[0, 1].plot(t_pair, pairs["cos_dist_h"], marker="o", ms=3, label=label)
-    axes[1, 0].plot(t_pair, pairs["l2_h"], marker="o", ms=3, label=label)
-    axes[1, 1].plot(t_pair, pairs["cos_dist_h_spatial"], marker="o", ms=3, label=label)
-    axes[0, 0].set(xlabel="t = d * euler_step", ylabel="||h_d||", title="residual branch norm")
-    axes[0, 1].set(xlabel="t", ylabel="1 - cos(h_d, h_{d+1})", title="cosine distance, flattened maps")
-    axes[1, 0].set(xlabel="t", ylabel="||h_d - h_{d+1}||", title="L2 distance between steps")
-    axes[1, 1].set(
-        xlabel="t",
-        ylabel="mean_{i,j}  1 - cos(h_d[i,j], h_{d+1}[i,j])",
-        title="mean per-location cosine distance (h)",
-    )
-    for ax in axes.flat:
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
-    fig.savefig(run_dir / "metrics.png", dpi=140)
-    plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
-    ax.plot(t_pair, pairs["cos_dist_h_spatial"], marker="o", ms=3, label=label)
+    # (0,0) ||f|| and ||f||/||x||
+    ax = axes[0, 0]
+    _plot_mean_std(
+        ax, t_state, norms["norm_f"], norms.get("norm_f_std", 0.0), label=r"$\|f_d\|$"
+    )
+    _plot_mean_std(
+        ax,
+        t_state,
+        norms["norm_f_over_norm_x"],
+        norms.get("norm_f_over_norm_x_std", 0.0),
+        label=r"$\|f_d\| / \|x_d\|$",
+    )
+    ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($\mathrm{f}=h/\mathrm{ES}$)")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+
+    # (0,1) angular velocity from flattened cos
+    ax = axes[0, 1]
+    _plot_mean_std(
+        ax, t_pair, pairs["omega_h"], pairs.get("omega_h_std", 0.0), label=label
+    )
     ax.set(
-        xlabel="t = d * euler_step",
-        ylabel="mean of the HxW cosine-distance map",
+        xlabel="t",
+        ylabel=r"$\omega$ [rad / t]",
+        title=r"angular speed  $\arccos(\cos(h_d,h_{d+1}))/\mathrm{ES}$",
+    )
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+
+    # (1,0) alignment with h_0
+    ax = axes[1, 0]
+    _plot_mean_std(
+        ax, t_state, norms["cos_h0_hd"], norms.get("cos_h0_hd_std", 0.0), label=label
+    )
+    ax.axhline(0.0, color="0.7", lw=1, zorder=0)
+    ax.set_ylim(-1.05, 1.05)
+    ax.set(xlabel="t", ylabel=r"$\cos(h_0, h_d)$", title="alignment with initial residual")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+
+    # (1,1) spatial mean 1-cos (kept; flat series only used for correlation)
+    ax = axes[1, 1]
+    _plot_mean_std(
+        ax,
+        t_pair,
+        pairs["cos_dist_h_spatial"],
+        pairs.get("cos_dist_h_spatial_std", 0.0),
+        label=label,
+    )
+    ax.set(
+        xlabel="t",
+        ylabel=r"mean$_{i,j}\,[1-\cos(h_d[i,j], h_{d+1}[i,j])]$",
         title="mean per-location cosine distance (h)",
     )
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
-    fig.savefig(run_dir / "cos_spatial.png", dpi=140)
+
+    fig.savefig(run_dir / "metrics.png", dpi=140)
     plt.close(fig)
+
+    corr = res.get("cos_flat_spatial_corr", float("nan"))
+    print(f"  corr(flat 1-cos, spatial 1-cos) = {corr:.6f}")
+    print(
+        f"  rectitude R = N/L : mean={res.get('rectitude_mean', float('nan')):.6f} "
+        f"± {res.get('rectitude_std', float('nan')):.6f} "
+        f"(L̄={res.get('L_mean', float('nan')):.4g}, N̄={res.get('N_mean', float('nan')):.4g})"
+    )
+    print(
+        f"  PR_depth (H:[D,dim]) : mean={res.get('PR_depth_mean', float('nan')):.4f} "
+        f"± {res.get('PR_depth_std', float('nan')):.4f} "
+        f"(on mean traj={res.get('PR_depth_on_mean_traj', float('nan')):.4f})"
+    )
+    print(
+        f"  PR_spatial (mid h:[HW,C]) : mean={res.get('PR_spatial_mean', float('nan')):.4f} "
+        f"± {res.get('PR_spatial_std', float('nan')):.4f} "
+        f"(on mean traj={res.get('PR_spatial_on_mean_traj', float('nan')):.4f})"
+    )
 
 
 def scatter_io(
@@ -794,17 +1032,35 @@ def scatter_io(
     xlabel: str,
     ylabel: str,
     max_points: int = SCATTER_MAX_POINTS,
-) -> None:
-    """Scatter (input[d], output[d]) for every feature, one colour per depth."""
-    assert inputs.shape == outputs.shape
-    n = inputs.shape[0]
-    fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+    channel: int | None = SCATTER_CHANNEL,
+    draw_y_equals_x: bool = False,
+    label: str | None = None,
+    ax: plt.Axes | None = None,
+    color=None,
+) -> plt.Axes:
+    """Scatter (input[d], output[d]) for features, one colour per depth (or solid if ax shared)."""
+    assert inputs.shape == outputs.shape and inputs.ndim == 4
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+    else:
+        fig = ax.figure
+
+    n, n_c, n_h, n_w = inputs.shape
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"scatter channel {channel} outside 0..{n_c - 1}")
+        inputs = inputs[:, channel : channel + 1]
+        outputs = outputs[:, channel : channel + 1]
+        n_c = 1
+
     cmap = plt.cm.viridis
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
     lo = min(flat_in.min().item(), flat_out.min().item())
     hi = max(flat_in.max().item(), flat_out.max().item())
-    ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
+    if draw_y_equals_x:
+        ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
     for d in range(n):
         a = flat_in[d]
@@ -812,21 +1068,88 @@ def scatter_io(
         if a.numel() > max_points:
             idx = torch.randperm(a.numel())[:max_points]
             a, b = a[idx], b[idx]
+        c_kw = {}
+        if color is not None:
+            c_kw["color"] = color
+        else:
+            c_kw["c"] = [cmap(d / max(n - 1, 1))]
         ax.scatter(
             a.numpy(),
             b.numpy(),
             s=4,
             alpha=0.25,
-            c=[cmap(d / max(n - 1, 1))],
             linewidths=0,
-            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+            label=(label if d == 0 else None)
+            if label is not None
+            else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
+            **c_kw,
         )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    if own_fig:
+        ax.set_title(title)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=7, markerscale=2)
+    if own_fig:
+        ax.legend(fontsize=7, markerscale=2)
+        fig.savefig(path, dpi=140)
+        plt.close(fig)
+    return ax
+
+
+def scatter_residual_field(
+    res: dict,
+    *,
+    path: Path,
+    channel: int | None = SCATTER_CHANNEL,
+    max_points: int = SCATTER_MAX_POINTS,
+) -> None:
+    """Static scatter of (x_d, f(x_d)) with f = h/ES."""
+    es = float(res["euler_step"])
+    scatter_io(
+        res["mean_x"],
+        res["mean_h"] / max(es, 1e-12),
+        title=f"{res['name']} | {KIND_TITLES['scatter_h']}",
+        path=path,
+        xlabel="x_d",
+        ylabel=r"$f(x_d) = h_d / \mathrm{ES}$",
+        max_points=max_points,
+        channel=channel,
+        draw_y_equals_x=False,
+    )
+
+
+def scatter_overlay_by_d(
+    results: list[dict],
+    *,
+    path: Path,
+    channel: int | None = SCATTER_CHANNEL,
+    max_points: int = SCATTER_MAX_POINTS,
+) -> None:
+    """Overlay residual-field scatters for several D on the same axes."""
+    if not results:
+        return
+    fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+    cmap = plt.cm.turbo
+    for i, res in enumerate(results):
+        es = float(res["euler_step"])
+        color = cmap(i / max(len(results) - 1, 1))
+        scatter_io(
+            res["mean_x"],
+            res["mean_h"] / max(es, 1e-12),
+            title="",
+            path=path,
+            xlabel="x_d",
+            ylabel=r"$f(x_d) = h_d / \mathrm{ES}$",
+            max_points=max_points,
+            channel=channel,
+            draw_y_equals_x=False,
+            label=f"D={res['D']}",
+            ax=ax,
+            color=color,
+        )
+    ax.set_title("residual field overlay by D")
+    ax.legend(fontsize=8, markerscale=2)
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
@@ -954,14 +1277,15 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 fps=fps,
             )
         else:
+            es = float(res["euler_step"])
             written = scatter_io_animation(
                 res["mean_x"],
-                res["mean_h"],
+                res["mean_h"] / max(es, 1e-12),
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
                 out_stem=run_dir / kind,
                 xlabel="x_d",
-                ylabel="h_d = block(x_d) - x_d",
+                ylabel=r"$f(x_d)=h_d/\mathrm{ES}$",
                 fps=fps,
             )
         print(f"  {kind}: {[p.name for p in written.values()]}")
@@ -988,7 +1312,7 @@ def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dic
     return out
 
 
-def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) -> None:
+def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) -> dict:
     name = spec["name"]
     run_dir = OUT_DIR / name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1036,21 +1360,26 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
         path=run_dir / "scatter_x.png",
         xlabel="x_d",
         ylabel="x_{d+1}",
+        channel=SCATTER_CHANNEL,
+        draw_y_equals_x=True,
     )
-    scatter_io(
-        res["mean_x"],
-        res["mean_h"],
-        title=f"{name} | {KIND_TITLES['scatter_h']}",
-        path=run_dir / "scatter_h.png",
-        xlabel="x_d",
-        ylabel="h_d = block(x_d) - x_d",
-    )
+    scatter_residual_field(res, path=run_dir / "scatter_h.png", channel=SCATTER_CHANNEL)
     print(f"done -> {run_dir}")
 
+    # Drop heavy maps before returning a light copy for overlay.
+    light = {
+        "name": res["name"],
+        "D": res["D"],
+        "euler_step": res["euler_step"],
+        "mean_x": res["mean_x"],
+        "mean_h": res["mean_h"],
+        "n_images": res["n_images"],
+    }
     del res
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    return light
 
 
 def parse_args() -> argparse.Namespace:
@@ -1101,12 +1430,27 @@ def main() -> None:
     shared_block = model.deltifiedStage3[0]
     assert shared_block.eulerStep == 1.0
 
+    completed: list[dict] = []
     for spec in runs:
         marker = OUT_DIR / spec["name"] / "config.json"
         if args.skip_existing and marker.is_file():
             print(f"skip existing {spec['name']}")
             continue
-        run_one(model, shared_block, dataset, class_names, spec)
+        completed.append(run_one(model, shared_block, dataset, class_names, spec))
+
+    if SCATTER_OVERLAY_BY_D and completed:
+        by_key: dict[tuple, list[dict]] = {}
+        for res in completed:
+            key = (tuple(res["mean_x"].shape[1:]), res["n_images"])
+            by_key.setdefault(key, []).append(res)
+        for group in by_key.values():
+            if len(group) < 2:
+                continue
+            group = sorted(group, key=lambda r: r["D"])
+            ds = "-".join(str(r["D"]) for r in group)
+            out = OUT_DIR / f"scatter_h_overlay_D{ds}.png"
+            scatter_overlay_by_d(group, path=out, channel=SCATTER_CHANNEL)
+            print(f"overlay scatter -> {out}")
 
 
 if __name__ == "__main__":
