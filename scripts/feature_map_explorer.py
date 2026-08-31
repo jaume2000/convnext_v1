@@ -56,25 +56,28 @@ BATCH_SIZE = 16
 FPS = 10.0
 
 # Edit this list for the experiments to run on Leonardo.
+# Optional per-run field: ignore_top_k_channels (default = IGNORE_TOP_K_CHANNELS below).
 RUNS: list[dict] = [
-    {"name": "D100_rk1_c7_n50_bs16", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10},
-    {"name": "D100_rk1_c7_n1_bs1", "D": 100, "method": None, "class_id": 7, "max_images": 1, "batch_size": 1, "fps": 10},
-    {"name": "D100_rk1_c207_n50_bs16", "D": 100, "method": None, "class_id": 207, "max_images": 50, "batch_size": 4, "fps": 10},
-    {"name": "D100_rk1_c207_n1_bs1", "D": 100, "method": None, "class_id": 207, "max_images": 1, "batch_size": 1, "fps": 10},
-    {"name": "D100_rk1_c282_n50_bs16", "D": 100, "method": None, "class_id": 282, "max_images": 50, "batch_size": 4, "fps": 10},
-    {"name": "D100_rk1_c282_n1_bs1", "D": 100, "method": None, "class_id": 282, "max_images": 1, "batch_size": 1, "fps": 10},
-    {"name": "D100_rk1_c289_n50_bs16", "D": 100, "method": None, "class_id": 289, "max_images": 50, "batch_size": 4, "fps": 10},
-    {"name": "D100_rk1_c289_n1_bs1", "D": 100, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 10},
-    {"name": "D50_rk1_c289_n1_bs1", "D": 50, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 5},
-    {"name": "D25_rk1_c289_n1_bs1", "D": 25, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 3},
-    {"name": "D9_rk1_c289_n1_bs1", "D": 9, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1},
-    {"name": "D8_rk1_c289_n1_bs1", "D": 8, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1},
-    {"name": "D5_rk1_c289_n1_bs1", "D": 5, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5},
-    {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5},
+    {"name": "D100_rk1_c7_n50_bs16", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c7_n1_bs1", "D": 100, "method": None, "class_id": 7, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c207_n50_bs16", "D": 100, "method": None, "class_id": 207, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c207_n1_bs1", "D": 100, "method": None, "class_id": 207, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c282_n50_bs16", "D": 100, "method": None, "class_id": 282, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c282_n1_bs1", "D": 100, "method": None, "class_id": 282, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c289_n50_bs16", "D": 100, "method": None, "class_id": 289, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D100_rk1_c289_n1_bs1", "D": 100, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
+    {"name": "D50_rk1_c289_n1_bs1", "D": 50, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 5, "ignore_top_k_channels": 1},
+    {"name": "D25_rk1_c289_n1_bs1", "D": 25, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 3, "ignore_top_k_channels": 1},
+    {"name": "D9_rk1_c289_n1_bs1", "D": 9, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 1},
+    {"name": "D8_rk1_c289_n1_bs1", "D": 8, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 1},
+    {"name": "D5_rk1_c289_n1_bs1", "D": 5, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
+    {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
 ]
 
 CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
+# Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
+IGNORE_TOP_K_CHANNELS = 1
 VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH"]
 
 CMAP_X = "viridis"
@@ -93,7 +96,7 @@ FIGSIZE, DPI = (4.4, 4.2), 100
 # C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
 CH_PX_PER_CELL = 8
 CH_DPI = 100
-CH_TITLE_PX = 40
+CH_TITLE_PX = 56  # 3-line title: run name / formula / depth
 CH_LEFT_PX = 44  # room for H tick labels / ylabel
 CH_XLABEL_PX = 52  # channel ticks + "channel" under the map
 CH_CBAR_GAP_PX = 40  # gap for colorbar tick labels (drawn above the strip)
@@ -102,12 +105,12 @@ CH_BOTTOM_PAD_PX = 10
 CH_GRID_PX_PER_CELL = 3  # smaller cells for multi-panel grids
 
 KIND_TITLES = {
-    "h": "h_d (block output, no residual)",
-    "x": "x_d (state)",
-    "cos_h": "1 - cos(h_d[i,j], h_{d+1}[i,j])  per location",
-    "cos_x": "1 - cos(x_d[i,j], x_{d+1}[i,j])  per location",
-    "norm_h": "||h_d[:,i,j]||  per location",
-    "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||  per location",
+    "h": "h_d = block(x_d) - x_d",
+    "x": "x_d",
+    "cos_h": "1 - cos(h_d[i,j], h_{d+1}[i,j])",
+    "cos_x": "1 - cos(x_d[i,j], x_{d+1}[i,j])",
+    "norm_h": "||h_d[:,i,j]||",
+    "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||",
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
 }
@@ -274,8 +277,124 @@ def most_active_channels(mean_map: torch.Tensor, k: int) -> list[int]:
     return total_variation.argsort(descending=True)[:k].tolist()
 
 
+def channel_spatial_norms(maps: torch.Tensor) -> torch.Tensor:
+    """Per-channel norm: each channel is a WxH vector; aggregate over depth with L2.
+
+    maps: [T, C, H, W] → [C], where score_c = || (||maps[t,c]||_F)_t ||_2
+    """
+    # [T, C] Frobenius norms over H×W, then L2 over T
+    return maps.flatten(2).norm(dim=-1).norm(dim=0)
+
+
+def top_norm_channels(maps: torch.Tensor, k: int) -> list[int]:
+    if k <= 0:
+        return []
+    k = min(k, maps.shape[1])
+    return channel_spatial_norms(maps).topk(k).indices.tolist()
+
+
+def zero_channels(maps: torch.Tensor, channels: list[int]) -> torch.Tensor:
+    if not channels:
+        return maps
+    out = maps.clone()
+    out[:, channels] = 0
+    return out
+
+
+def spatial_maps_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Rebuild H×W video tensors from (possibly channel-masked) mean maps."""
+    D = mean_x.shape[0] - 1
+    cos_h = torch.stack(
+        [1 - F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0) for d in range(D)]
+    )
+    cos_x = torch.stack(
+        [1 - F.cosine_similarity(mean_x[d], mean_x[d + 1], dim=0) for d in range(D)]
+    )
+    l2_h = torch.stack([(mean_h[d] - mean_h[d + 1]).norm(dim=0) for d in range(D)])
+    return {
+        "cos_h": cos_h,
+        "cos_x": cos_x,
+        "norm_h": mean_h.norm(dim=1),
+        "l2_h": l2_h,
+    }
+
+
+def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Norm / pair tables from mean maps (used after channel masking)."""
+    D = mean_x.shape[0] - 1
+    depths = torch.arange(D + 1)
+    norm_h = mean_h.flatten(1).norm(dim=1)
+    norm_x = mean_x.flatten(1).norm(dim=1)
+    norms = pd.DataFrame(
+        {
+            "d": depths.numpy(),
+            "t": (depths * euler_step).numpy(),
+            "norm_h": norm_h.numpy(),
+            "norm_x": norm_x.numpy(),
+        }
+    )
+    norms["norm_h_over_norm_x"] = norms["norm_h"] / norms["norm_x"]
+
+    cos_h = []
+    cos_x = []
+    l2_h = []
+    l2_x = []
+    cos_h_spatial = []
+    cos_x_spatial = []
+    for d in range(D):
+        cos_h.append(1 - F.cosine_similarity(mean_h[d].flatten(), mean_h[d + 1].flatten(), dim=0).item())
+        cos_x.append(1 - F.cosine_similarity(mean_x[d].flatten(), mean_x[d + 1].flatten(), dim=0).item())
+        l2_h.append((mean_h[d] - mean_h[d + 1]).norm().item())
+        l2_x.append((mean_x[d] - mean_x[d + 1]).norm().item())
+        loc_h = 1 - F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0)
+        loc_x = 1 - F.cosine_similarity(mean_x[d], mean_x[d + 1], dim=0)
+        cos_h_spatial.append(loc_h.mean().item())
+        cos_x_spatial.append(loc_x.mean().item())
+    pairs = pd.DataFrame(
+        {
+            "d": list(range(D)),
+            "pair": [f"{d}->{d + 1}" for d in range(D)],
+            "cos_dist_h": cos_h,
+            "cos_dist_h_spatial": cos_h_spatial,
+            "l2_h": l2_h,
+            "cos_dist_x": cos_x,
+            "cos_dist_x_spatial": cos_x_spatial,
+            "l2_x": l2_x,
+        }
+    )
+    return norms, pairs
+
+
+def apply_ignore_top_k_channels(res: dict, k: int) -> list[int]:
+    """Zero top-K channels (ranked on mean_h WxH norms) in mean maps; refresh derived fields."""
+    if k <= 0:
+        res["ignored_channels"] = []
+        return []
+    ignored = top_norm_channels(res["mean_h"], k)
+    res["mean_h"] = zero_channels(res["mean_h"], ignored)
+    res["mean_x"] = zero_channels(res["mean_x"], ignored)
+    res.update(spatial_maps_from_means(res["mean_x"], res["mean_h"]))
+    res["norms"], res["pairs"] = tables_from_means(
+        res["mean_x"], res["mean_h"], euler_step=res["euler_step"]
+    )
+    res["ignored_channels"] = ignored
+    return ignored
+
+
 def is_pair_kind(kind: str) -> bool:
     return kind in ("cos_h", "cos_x", "l2_h")
+
+
+def depth_line(kind: str, d: int, last: int) -> str:
+    """Third title line: dX → dX+1 (d/D) for pair maps, else dX (d/D)."""
+    if is_pair_kind(kind):
+        return f"d{d} → d{d + 1} ({d}/{last})"
+    return f"d{d} ({d}/{last})"
+
+
+def frame_heading(run_name: str, formula: str, depth: str) -> str:
+    """Three-line frame title: experiment / formula / depth."""
+    return f"{run_name}\n{formula}\n{depth}"
 
 
 def draw_style(maps: torch.Tensor, kind: str) -> dict:
@@ -323,8 +442,7 @@ def render_ch_frame(
     frame: torch.Tensor,
     path: Path,
     *,
-    title: str,
-    frame_label: str,
+    heading: str,
     style: dict,
     px_per_cell: int = CH_PX_PER_CELL,
 ) -> None:
@@ -345,10 +463,11 @@ def render_ch_frame(
     fig.text(
         (CH_LEFT_PX + data_w_px / 2) / fig_w_px,
         1 - CH_TITLE_PX / (2 * fig_h_px),
-        f"{title}\n{frame_label}",
+        heading,
         ha="center",
         va="center",
-        fontsize=9,
+        fontsize=8,
+        linespacing=1.25,
     )
 
     ax = fig.add_axes(_rect(CH_LEFT_PX, y_data, data_w_px, data_h_px))
@@ -387,7 +506,14 @@ def render_ch_frame(
     plt.close(fig)
 
 
-def render_frames(maps: torch.Tensor, out_dir: Path, *, title: str, kind: str) -> None:
+def render_frames(
+    maps: torch.Tensor,
+    out_dir: Path,
+    *,
+    run_name: str,
+    formula: str,
+    kind: str,
+) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -395,21 +521,18 @@ def render_frames(maps: torch.Tensor, out_dir: Path, *, title: str, kind: str) -
     is_ch = kind.endswith("_CH")
     last = len(maps) - 1
     for d, frame in enumerate(maps):
-        frame_label = (
-            f"d = {d} → {d + 1}  ({d} / {last})" if is_pair_kind(kind) else f"d = {d} / {last}"
-        )
+        heading = frame_heading(run_name, formula, depth_line(kind, d, last))
         if is_ch:
             render_ch_frame(
                 frame,
                 out_dir / f"frame_{d:04d}.png",
-                title=title,
-                frame_label=frame_label,
+                heading=heading,
                 style=style,
             )
             continue
         fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, layout="constrained")
         im = ax.imshow(frame.numpy(), interpolation="nearest", aspect="auto", origin="lower", **style)
-        ax.set_title(f"{title}\n{frame_label}", fontsize=10)
+        ax.set_title(heading, fontsize=9, linespacing=1.2)
         ax.axis("off")
         fig.colorbar(im, ax=ax, fraction=0.046)
         fig.savefig(out_dir / f"frame_{d:04d}.png")
@@ -599,6 +722,8 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "video_maps": list(VIDEO_MAPS),
         "channels": CHANNELS,
         "n_auto_channels": N_AUTO_CHANNELS,
+        "ignore_top_k_channels": spec["ignore_top_k_channels"],
+        "ignored_channels": list(res.get("ignored_channels", [])),
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     if SAVE_TENSORS:
@@ -652,17 +777,30 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     plt.close(fig)
 
 
-def scatter_io(maps: torch.Tensor, *, title: str, path: Path, max_points: int = SCATTER_MAX_POINTS) -> None:
-    D = maps.shape[0] - 1
+def scatter_io(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    xlabel: str,
+    ylabel: str,
+    max_points: int = SCATTER_MAX_POINTS,
+) -> None:
+    """Scatter (input[d], output[d]) for every feature, one colour per depth."""
+    assert inputs.shape == outputs.shape
+    n = inputs.shape[0]
     fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
     cmap = plt.cm.viridis
-    flat_all = maps.reshape(D + 1, -1)
-    lo = flat_all.min().item()
-    hi = flat_all.max().item()
+    flat_in = inputs.reshape(n, -1)
+    flat_out = outputs.reshape(n, -1)
+    lo = min(flat_in.min().item(), flat_out.min().item())
+    hi = max(flat_in.max().item(), flat_out.max().item())
     ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
-    for d in range(D):
-        a = maps[d].reshape(-1)
-        b = maps[d + 1].reshape(-1)
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for d in range(n):
+        a = flat_in[d]
+        b = flat_out[d]
         if a.numel() > max_points:
             idx = torch.randperm(a.numel())[:max_points]
             a, b = a[idx], b[idx]
@@ -671,12 +809,12 @@ def scatter_io(maps: torch.Tensor, *, title: str, path: Path, max_points: int = 
             b.numpy(),
             s=4,
             alpha=0.25,
-            c=[cmap(d / max(D - 1, 1))],
+            c=[cmap(d / max(n - 1, 1))],
             linewidths=0,
-            label=f"d={d}" if D <= 12 or d in (0, D // 2, D - 1) else None,
+            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
         )
-    ax.set_xlabel("input (depth d)")
-    ax.set_ylabel("output (depth d+1)")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.3)
@@ -687,6 +825,7 @@ def scatter_io(maps: torch.Tensor, *, title: str, path: Path, max_points: int = 
 
 def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
     fps = float(res["spec"]["fps"])
+    run_name = res["name"]
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
     map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", "h_CH", "x_CH")]
 
@@ -694,21 +833,32 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
         mean_map = res[f"mean_{kind}"]
         for channel in channels:
             stem = f"{kind}_ch{channel:03d}"
-            title = f"{res['name']} | {KIND_TITLES[kind]} | channel {channel}"
+            formula = f"{KIND_TITLES[kind]}  |  channel {channel}"
             frame_dir = run_dir / "frames" / stem
-            render_frames(mean_map[:, channel], frame_dir, title=title, kind=kind)
+            render_frames(
+                mean_map[:, channel],
+                frame_dir,
+                run_name=run_name,
+                formula=formula,
+                kind=kind,
+            )
             if mean_map.shape[0] <= GRID_MAX_FRAMES:
-                save_grid(mean_map[:, channel], run_dir / f"{stem}_grid.png", title=title, kind=kind)
+                save_grid(
+                    mean_map[:, channel],
+                    run_dir / f"{stem}_grid.png",
+                    title=f"{run_name}\n{formula}",
+                    kind=kind,
+                )
             written = write_video(frame_dir, run_dir / stem, fps=fps, n_frames=mean_map.shape[0])
             print(f"  {stem}: {[p.name for p in written.values()]}")
 
     for kind in map_kinds:
         maps = map_tensor(res, kind)
-        title = f"{res['name']} | {KIND_TITLES[kind]}"
+        formula = KIND_TITLES[kind]
         frame_dir = run_dir / "frames" / kind
-        render_frames(maps, frame_dir, title=title, kind=kind)
+        render_frames(maps, frame_dir, run_name=run_name, formula=formula, kind=kind)
         if maps.shape[0] <= GRID_MAX_FRAMES:
-            save_grid(maps, run_dir / f"{kind}_grid.png", title=title, kind=kind)
+            save_grid(maps, run_dir / f"{kind}_grid.png", title=f"{run_name}\n{formula}", kind=kind)
         written = write_video(frame_dir, run_dir / kind, fps=fps, n_frames=maps.shape[0])
         print(f"  {kind}: {[p.name for p in written.values()]}")
 
@@ -719,6 +869,7 @@ def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dic
     out["max_images"] = out.get("max_images", MAX_IMAGES_PER_CLASS)
     out["batch_size"] = out.get("batch_size", BATCH_SIZE)
     out["fps"] = out.get("fps", FPS)
+    out["ignore_top_k_channels"] = out.get("ignore_top_k_channels", IGNORE_TOP_K_CHANNELS)
     if out.get("image_indices") is None:
         if out["class_id"] is not None:
             cid = out["class_id"]
@@ -760,6 +911,10 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     res["name"] = name
     res["spec"] = spec
 
+    ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
+    if ignored:
+        print(f"ignored top-{spec['ignore_top_k_channels']} channels by ||h|| (WxH): {ignored}")
+
     save_tables_and_config(res, class_names, run_dir)
     save_metric_plots(res, run_dir)
 
@@ -769,8 +924,23 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     print(f"channels={channels}")
     write_videos(res, channels, run_dir)
 
-    scatter_io(res["mean_x"], title=f"{name} | X cumulative: x_d → x_{{d+1}}", path=run_dir / "scatter_x.png")
-    scatter_io(res["mean_h"], title=f"{name} | H increment: h_d → h_{{d+1}}", path=run_dir / "scatter_h.png")
+    # x → x+f(x): consecutive states. x → h: residual branch only (no +x).
+    scatter_io(
+        res["mean_x"][:-1],
+        res["mean_x"][1:],
+        title=f"{name} | X cumulative: x_d → x_{{d+1}}",
+        path=run_dir / "scatter_x.png",
+        xlabel="x_d",
+        ylabel="x_{d+1}",
+    )
+    scatter_io(
+        res["mean_x"],
+        res["mean_h"],
+        title=f"{name} | residual: x_d → h_d = f(x_d)",
+        path=run_dir / "scatter_h.png",
+        xlabel="x_d",
+        ylabel="h_d = block(x_d) - x_d",
+    )
     print(f"done -> {run_dir}")
 
     del res
@@ -815,7 +985,7 @@ def main() -> None:
     for spec in runs:
         cid = spec["class_id"]
         who = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked"
-        print(f"  {spec['name']}: {who}, n={len(spec['image_indices'])}, bs={spec['batch_size']}, fps={spec['fps']}")
+        print(f"  {spec['name']}: {who}, n={len(spec['image_indices'])}, bs={spec['batch_size']}, fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}")
 
     if args.list_only:
         return
