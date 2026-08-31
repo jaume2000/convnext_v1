@@ -118,14 +118,14 @@ CH_GRID_PX_PER_CELL = 3  # smaller cells for multi-panel grids
 KIND_TITLES = {
     "h": "h_d = block(x_d) - x_d",
     "x": "x_d",
-    "cos_h": "1 - cos(h_d[i,j], h_{d+1}[i,j])",
+    "cos_h": "ω = arccos(cos(h_d[i,j], h_{d+1}[i,j])) / ES  [rad/t]",
     "cos_x": "1 - cos(x_d[i,j], x_{d+1}[i,j])",
     "norm_h": "||h_d[:,i,j]||",
     "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||",
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
-    "scatter_x": "X cumulative: x_d → x_{d+1}",
-    "scatter_h": "residual field: x_d → f(x_d) = h_d / ES",
+    "scatter_x": "flow from init: x_0 → x_d",
+    "scatter_h": "residual field: x_d → f(x_d) = h_d = block(x_d) - x_d",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -212,8 +212,9 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
 def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, batch_size, dataset):
     """Integrate the shared block and collect per-image dynamics + mean maps.
 
-    Stored residual maps keep the existing convention h = block(x) - x (no ES).
-    Derived field used in plots/metrics: f = h / ES.
+    Stored residual maps: h = block(x) - x (= ODE field f). Update: x ← x + ES·h.
+    Scatter / rectitude use f = h. The norms panel still reports \|h\|/ES as a
+    separate derived curve (legacy naming).
     """
     method = method.upper() if isinstance(method, str) else method
     n = len(indices)
@@ -278,9 +279,9 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             norm_x_i[start : start + bsz, d] = n_x.double().cpu()
             align_h0_i[start : start + bsz, d] = F.cosine_similarity(h0_flat, h_flat, dim=1).double().cpu()
             H_rows.append(h_flat.detach().cpu())
-            # L = ES * sum ||f_d|| with f = h/ES → sum ||h_d|| over applied steps.
+            # Path length L = ES * sum ||f_d|| with f = h = block(x)-x.
             if d < D:
-                path_len = path_len + n_h.double()
+                path_len = path_len + es * n_h.double()
 
             if d == D:
                 break
@@ -297,16 +298,18 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
                 1.0 - F.cosine_similarity(x_flat, x_next_flat, dim=1)
             ).double().cpu()
 
-            loc_h = 1.0 - F.cosine_similarity(h, h_next, dim=1)
+            loc_cos_h = F.cosine_similarity(h, h_next, dim=1).clamp(-1.0, 1.0)
+            loc_h = 1.0 - loc_cos_h  # kept for spatial 1-cos series / correlation
+            loc_omega_h = torch.arccos(loc_cos_h) / max(es, 1e-12)
             loc_x = 1.0 - F.cosine_similarity(x, x_next, dim=1)
-            cos_map_h[d] += w * loc_h.sum(0)
+            cos_map_h[d] += w * loc_omega_h.sum(0)
             cos_map_x[d] += w * loc_x.sum(0)
             cos_spatial_i[start : start + bsz, d] = loc_h.mean(dim=(1, 2)).double().cpu()
             cos_x_spatial_i[start : start + bsz, d] = loc_x.mean(dim=(1, 2)).double().cpu()
             l2_map_h[d] += w * (h - h_next).norm(dim=1).sum(0)
             x, h = x_next, h_next
 
-        # Rectitude: L = sum_d ||h_d|| (= ES * sum ||f_d||), N = ||x_D - x_0||, R = N/L.
+        # Rectitude: L = ES * sum ||f_d|| (f = h), N = ||x_D - x_0||, R = N/L.
         disp = (x - x0).flatten(1).norm(dim=1).double()
         rect_L_i[start : start + bsz] = path_len.cpu()
         rect_N_i[start : start + bsz] = disp.cpu()
@@ -457,11 +460,20 @@ def zero_channels(maps: torch.Tensor, channels: list[int]) -> torch.Tensor:
     return out
 
 
-def spatial_maps_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor) -> dict[str, torch.Tensor]:
+def spatial_maps_from_means(
+    mean_x: torch.Tensor,
+    mean_h: torch.Tensor,
+    *,
+    euler_step: float = 1.0,
+) -> dict[str, torch.Tensor]:
     """Rebuild H×W video tensors from (possibly channel-masked) mean maps."""
     D = mean_x.shape[0] - 1
+    es = max(float(euler_step), 1e-12)
     cos_h = torch.stack(
-        [1 - F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0) for d in range(D)]
+        [
+            torch.arccos(F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0).clamp(-1.0, 1.0)) / es
+            for d in range(D)
+        ]
     )
     cos_x = torch.stack(
         [1 - F.cosine_similarity(mean_x[d], mean_x[d + 1], dim=0) for d in range(D)]
@@ -550,7 +562,7 @@ def apply_ignore_top_k_channels(res: dict, k: int) -> list[int]:
     ignored = top_norm_channels(res["mean_h"], k)
     res["mean_h"] = zero_channels(res["mean_h"], ignored)
     res["mean_x"] = zero_channels(res["mean_x"], ignored)
-    res.update(spatial_maps_from_means(res["mean_x"], res["mean_h"]))
+    res.update(spatial_maps_from_means(res["mean_x"], res["mean_h"], euler_step=res["euler_step"]))
     res["ignored_channels"] = ignored
     return ignored
 
@@ -1104,15 +1116,14 @@ def scatter_residual_field(
     channel: int | None = SCATTER_CHANNEL,
     max_points: int = SCATTER_MAX_POINTS,
 ) -> None:
-    """Static scatter of (x_d, f(x_d)) with f = h/ES."""
-    es = float(res["euler_step"])
+    """Static scatter of (x_d, f(x_d)) with f = h = block(x) - x."""
     scatter_io(
         res["mean_x"],
-        res["mean_h"] / max(es, 1e-12),
+        res["mean_h"],
         title=f"{res['name']} | {KIND_TITLES['scatter_h']}",
         path=path,
         xlabel="x_d",
-        ylabel=r"$f(x_d) = h_d / \mathrm{ES}$",
+        ylabel=r"$f(x_d) = h_d$",
         max_points=max_points,
         channel=channel,
         draw_y_equals_x=False,
@@ -1132,15 +1143,14 @@ def scatter_overlay_by_d(
     fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
     cmap = plt.cm.turbo
     for i, res in enumerate(results):
-        es = float(res["euler_step"])
         color = cmap(i / max(len(results) - 1, 1))
         scatter_io(
             res["mean_x"],
-            res["mean_h"] / max(es, 1e-12),
+            res["mean_h"],
             title="",
             path=path,
             xlabel="x_d",
-            ylabel=r"$f(x_d) = h_d / \mathrm{ES}$",
+            ylabel=r"$f(x_d) = h_d$",
             max_points=max_points,
             channel=channel,
             draw_y_equals_x=False,
@@ -1266,26 +1276,27 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
 
     for kind in scatter_kinds:
         if kind == "scatter_x":
+            x = res["mean_x"]
+            x0 = x[:1].expand_as(x)
             written = scatter_io_animation(
-                res["mean_x"][:-1],
-                res["mean_x"][1:],
+                x0,
+                x,
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
                 out_stem=run_dir / kind,
-                xlabel="x_d",
-                ylabel="x_{d+1}",
+                xlabel="x_0",
+                ylabel="x_d",
                 fps=fps,
             )
         else:
-            es = float(res["euler_step"])
             written = scatter_io_animation(
                 res["mean_x"],
-                res["mean_h"] / max(es, 1e-12),
+                res["mean_h"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
                 out_stem=run_dir / kind,
                 xlabel="x_d",
-                ylabel=r"$f(x_d)=h_d/\mathrm{ES}$",
+                ylabel=r"$f(x_d)=h_d$",
                 fps=fps,
             )
         print(f"  {kind}: {[p.name for p in written.values()]}")
@@ -1353,13 +1364,14 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     write_videos(res, channels, run_dir)
 
     # Static overlays (always). Animations are gated by VIDEO_MAPS via write_videos.
+    x = res["mean_x"]
     scatter_io(
-        res["mean_x"][:-1],
-        res["mean_x"][1:],
+        x[:1].expand_as(x),
+        x,
         title=f"{name} | {KIND_TITLES['scatter_x']}",
         path=run_dir / "scatter_x.png",
-        xlabel="x_d",
-        ylabel="x_{d+1}",
+        xlabel="x_0",
+        ylabel="x_d",
         channel=SCATTER_CHANNEL,
         draw_y_equals_x=True,
     )
