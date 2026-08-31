@@ -19,6 +19,7 @@ import argparse
 import gc
 import json
 import os
+from pickle import TRUE
 import shutil
 import subprocess
 import sys
@@ -83,12 +84,16 @@ CMAP_NORM = "magma"
 SHARED_SCALE = True
 SAVE_TENSORS = False
 GRID_MAX_FRAMES = 36
-SCATTER_MAX_POINTS = 8000
+SCATTER_MAX_POINTS = 99999999
 # Building a GIF loads every frame into RAM — skip when D is large.
-GIF_MAX_FRAMES = 40
+GIF_MAX_FRAMES = 9999
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
-KEEP_FRAMES = False
+KEEP_FRAMES = True
 FIGSIZE, DPI = (4.4, 4.2), 100
+# C×H: channels on x (vertical stripes), H on y. Scale pixels so both axes are readable.
+CH_PX_PER_CHANNEL = 3
+CH_PX_PER_H = 16
+CH_DPI = 120
 
 KIND_TITLES = {
     "h": "h_d (block output, no residual)",
@@ -97,8 +102,8 @@ KIND_TITLES = {
     "cos_x": "1 - cos(x_d[i,j], x_{d+1}[i,j])  per location",
     "norm_h": "||h_d[:,i,j]||  per location",
     "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||  per location",
-    "h_CH": "h_d C×H cut (mean over W)",
-    "x_CH": "x_d C×H cut (mean over W)",
+    "h_CH": "h_d C×H slice at W//2",
+    "x_CH": "x_d C×H slice at W//2",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -286,22 +291,53 @@ def draw_style(maps: torch.Tensor, kind: str) -> dict:
     return {"cmap": cmap, "vmin": maps.min().item(), "vmax": maps.max().item()}
 
 
+def ch_cut(maps: torch.Tensor) -> torch.Tensor:
+    """Slice at W//2 → [T, H, C]: x=channel (vertical lines), y=spatial H."""
+    w = maps.shape[-1] // 2
+    return maps[..., w].permute(0, 2, 1)
+
+
+def ch_figsize(n_h: int, n_c: int) -> tuple[float, float]:
+    """Wide canvas sized from data (≈384×14), with extra vertical stretch for H rows."""
+    width = (n_c * CH_PX_PER_CHANNEL) / CH_DPI + 0.8
+    height = (n_h * CH_PX_PER_H) / CH_DPI + 1.8  # title + horizontal colorbar
+    return width, height
+
+
 def render_frames(maps: torch.Tensor, out_dir: Path, *, title: str, kind: str) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     style = draw_style(maps, kind)
-    aspect = "auto" if kind.endswith("_CH") else None
+    is_ch = kind.endswith("_CH")
+    ch_fig = ch_figsize(maps.shape[1], maps.shape[2]) if is_ch else None
     for d, frame in enumerate(maps):
-        fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, layout="constrained")
-        im = ax.imshow(frame.numpy(), interpolation="nearest", aspect=aspect, **style)
+        if is_ch:
+            fig, ax = plt.subplots(figsize=ch_fig, dpi=CH_DPI)
+        else:
+            fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, layout="constrained")
+        im = ax.imshow(
+            frame.numpy(),
+            interpolation="nearest",
+            aspect="auto",
+            origin="lower",
+            **style,
+        )
         last = len(maps) - 1
         frame_label = (
             f"d = {d} → {d + 1}  ({d} / {last})" if is_pair_kind(kind) else f"d = {d} / {last}"
         )
         ax.set_title(f"{title}\n{frame_label}", fontsize=10)
-        ax.axis("off")
-        fig.colorbar(im, ax=ax, fraction=0.046)
+        if is_ch:
+            n_h, n_c = frame.shape
+            ax.set_xlabel("channel")
+            ax.set_ylabel("H")
+            ax.set_xlim(-0.5, n_c - 0.5)
+            ax.set_ylim(-0.5, n_h - 0.5)
+            fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.05, pad=0.18)
+        else:
+            ax.axis("off")
+            fig.colorbar(im, ax=ax, fraction=0.046)
         fig.savefig(out_dir / f"frame_{d:04d}.png")
         plt.close(fig)
 
@@ -311,15 +347,23 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
     ncols = min(ncols, n)
     nrows = -(-n // ncols)
     style = draw_style(maps, kind)
-    aspect = "auto" if kind.endswith("_CH") else None
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(2.1 * ncols, 2.3 * nrows), squeeze=False, layout="constrained"
-    )
+    is_ch = kind.endswith("_CH")
+    if is_ch:
+        fw, fh = ch_figsize(maps.shape[1], maps.shape[2])
+        figsize = (fw * min(ncols, 2), fh * nrows)
+    else:
+        figsize = (2.1 * ncols, 2.3 * nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False, layout="constrained")
     for ax in axes.flat:
         ax.axis("off")
     im = None
     for d, (ax, frame) in enumerate(zip(axes.flat, maps)):
-        im = ax.imshow(frame.numpy(), interpolation="nearest", aspect=aspect, **style)
+        im = ax.imshow(
+            frame.numpy(), interpolation="nearest", aspect="auto", origin="lower", **style
+        )
+        if is_ch:
+            ax.set_xlabel("ch", fontsize=7)
+            ax.set_ylabel("H", fontsize=7)
         ax.set_title(f"d={d}→{d + 1}" if is_pair_kind(kind) else f"d={d}", fontsize=9)
     if im is not None:
         fig.colorbar(im, ax=axes, fraction=0.02)
@@ -434,7 +478,7 @@ def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -
 
 def map_tensor(res: dict, kind: str) -> torch.Tensor:
     if kind in ("h_CH", "x_CH"):
-        return res[f"mean_{kind[0]}"].mean(dim=-1)
+        return ch_cut(res[f"mean_{kind[0]}"])
     return res[kind]
 
 
