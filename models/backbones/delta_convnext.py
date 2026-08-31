@@ -11,7 +11,7 @@ from .convnext import ConvNextV1
 class CustomForwardConfig(TypedDict):
     block_indices: list[int]
     euler_step: NotRequired[float]
-    method: NotRequired[str | None]  # None / "RK1" -> Euler; "RK2", "RK4"
+    method: NotRequired[str | None]  # None / "RK1" -> Euler; "RK2", "RK3", "RK4"
 
 class DeltaConvNext(ConvNextV1):
     def __init__(self, stage3_length: int=9, useDeltas: bool=True):
@@ -184,6 +184,12 @@ class DeltaConvNext(ConvNextV1):
             k1 = f(x)
             k2 = f(x + h * k1)
             return x + h / 2 * (k1 + k2)
+        if method == "RK3":
+            # Kutta's third order rule.
+            k1 = f(x)
+            k2 = f(x + h / 2 * k1)
+            k3 = f(x - h * k1 + 2 * h * k2)
+            return x + h / 6 * (k1 + 4 * k2 + k3)
         if method == "RK4":
             k1 = f(x)
             k2 = f(x + h / 2 * k1)
