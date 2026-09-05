@@ -8,13 +8,14 @@ from ..blocks.layerNorm2d import LayerNorm2d
 
 class ConvNextV1(nn.Module):
 
-    def __init__(self):
+    def __init__(self, drop_path_rate: float = 0.1):
         super().__init__()
         self.stage_dims = [96, 96 * 2, 96 * 4, 96 * 8]
         self.depths = [3, 3, 9, 3]
         self.accum_depths = [0] + [sum(self.depths[:i]) for i in range(1, len(self.depths))]
         self.total_depth = sum(self.depths)
-        self.drop_paths = torch.linspace(0, 0.1, self.total_depth).tolist()
+        self.drop_path_rate = drop_path_rate
+        self.drop_paths = torch.linspace(0, drop_path_rate, self.total_depth).tolist()
         self.stem = nn.Sequential(
             nn.Conv2d(3, 96, kernel_size=4, stride=4, padding=0),
             LayerNorm2d(96),

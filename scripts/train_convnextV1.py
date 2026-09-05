@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 
 load_dotenv()
+# Stochastic depth peak (linearly ramped across blocks). 0 disables drop path.
+DROP_PATH_RATE = float(os.environ.get("DROP_PATH_RATE", "0.1"))
 EXPERIMENT_NAME = experiment_name("convnextv1_imagenet")
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 EPOCHS = 300
@@ -43,7 +45,8 @@ def available_cpus() -> int:
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ConvNextV1()
+model = ConvNextV1(drop_path_rate=DROP_PATH_RATE)
+print(f"drop_path_rate={DROP_PATH_RATE}")
 if device.type == "cuda" and torch.cuda.device_count() > 1:
     model = nn.DataParallel(model)
     print(f"DataParallel on GPUs: {model.device_ids}")
