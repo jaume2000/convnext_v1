@@ -119,6 +119,6 @@ trainer = Trainer(
     num_classes=1000,
     amp=False,
     gradient_clipping=None,
-    retake=True,
+    retake=RETAKE,
 )
 trainer.fit(EPOCHS, train_history_metrics, val_history_metrics)
