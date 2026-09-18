@@ -95,28 +95,27 @@ RUNS_SHARED: list[dict] = [
 ]
 
 # 4 experiments × 4 models (convnext, resnet50, resnet101, swin).
-_IE = dict(class_id=289, max_images=1, batch_size=1, fps=2)
 INTERPOLED_EXPERIMENTS: list[dict] = [
     # --- convnext ---
-    {"model": "convnext", "name": "convnext_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
-    {"model": "convnext", "name": "convnext_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
-    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
-    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    {"model": "convnext", "name": "convnext_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
+    {"model": "convnext", "name": "convnext_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
+    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
     # --- resnet50 ---
-    {"model": "resnet50", "name": "resnet50_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
-    {"model": "resnet50", "name": "resnet50_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
-    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
-    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    {"model": "resnet50", "name": "resnet50_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
+    {"model": "resnet50", "name": "resnet50_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
+    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
     # --- resnet101 ---
-    {"model": "resnet101", "name": "resnet101_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
-    {"model": "resnet101", "name": "resnet101_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
-    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
-    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    {"model": "resnet101", "name": "resnet101_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
+    {"model": "resnet101", "name": "resnet101_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
+    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
     # --- swin ---
-    {"model": "swin", "name": "swin_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
-    {"model": "swin", "name": "swin_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
-    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
-    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    {"model": "swin", "name": "swin_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
+    {"model": "swin", "name": "swin_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
+    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
 ]
 
 INTERPOLED_MODEL_KEYS = ("convnext", "resnet50", "resnet101", "swin")
