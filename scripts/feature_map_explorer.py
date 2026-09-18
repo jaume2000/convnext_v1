@@ -1,8 +1,12 @@
-"""Stage-3 feature-map trajectories for shared or interpoled ConvNeXt.
+"""Stage-3 feature-map trajectories for shared ConvNeXt or interpoled backbones.
 
 Shared mode (``BACKBONE = "shared"``): integrates one shared residual ``D`` times
-(DeltaConvNext checkpoint). Interpoled mode (``BACKBONE = "interpoled"``): walks a
-stage-3 ``blocks`` / ``repeats`` schedule like ``scripts/convnext_interpolation.py``.
+(DeltaConvNext checkpoint).
+
+Interpoled mode (``BACKBONE = "interpoled"``): walks a stage-3 ``blocks`` /
+``repeats`` schedule on any of ``convnext``, ``resnet50``, ``resnet101``, ``swin``
+(set via ``INTERPOLED_MODELS`` / per-run ``model``). Swin NHWC is wrapped to NCHW
+for the same analysis/plots as ConvNeXt/ResNet.
 
 Submit:
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
@@ -10,7 +14,7 @@ Submit:
 Or locally:
   python scripts/feature_map_explorer.py
   python scripts/feature_map_explorer.py --list-only
-  python scripts/feature_map_explorer.py --only B6_ES9_c289_n1
+  python scripts/feature_map_explorer.py --only resnet50_baseline_R1_ES1_c289_n1
 """
 
 from __future__ import annotations
@@ -37,20 +41,27 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from torch import nn
 from tqdm import tqdm
 
 from data.imagenet import ImageNetDataset
 from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_val_transforms
 from models.backbones.delta_convnext import DeltaConvNext
 from models.backbones.interpoled_convnext import InterpoledConvNextV1
+from models.backbones.interpoled_resnet import InterpoledResNet50, InterpoledResNet101
+from models.backbones.interpoled_swin import InterpoledSwinT
 from utils.env import load_dotenv
 
 # --------------------------------------------------------------------------- config
-# "shared" = DeltaConvNext shared residual × D; "interpoled" = distinct stage-3 blocks.
+# "shared" = DeltaConvNext shared residual × D
+# "interpoled" = distinct stage-3 blocks on convnext / resnet50 / resnet101 / swin
 BACKBONE = "interpoled"  # "shared" | "interpoled"
 
+# Which interpoled networks to sweep (each INTERPOLED_EXPERIMENT is cloned per model).
+INTERPOLED_MODELS = ["convnext", "resnet50", "resnet101", "swin"]
+
 SHARED_CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
-INTERPOLED_CHECKPOINT = (
+INTERPOLED_CONVNEXT_CHECKPOINT = (
     _REPO_ROOT / "outputs" / "convnextv1_imagenet" / "weights" / "last.pth"
 )
 OUT_DIR_SHARED = _REPO_ROOT / "outputs" / "featureMaps"
@@ -59,7 +70,6 @@ OUT_DIR_INTERPOLED = _REPO_ROOT / "outputs" / "featureMaps_interpoled"
 SPLIT = "validation"
 IMAGE_INDICES = [0, 17, 4242]
 CLASS_ID: int | None = 207
-# Default N images to average curves over (mean ± std).
 MAX_IMAGES_PER_CLASS: int | None = 100
 BATCH_SIZE = 8
 FPS = 10.0
@@ -83,25 +93,37 @@ RUNS_SHARED: list[dict] = [
     {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
 ]
 
-# Interpoled ConvNeXt-T runs: ``blocks`` XOR ``repeats``, plus ``euler_step``
-# (same semantics as scripts/convnext_interpolation.py).
-RUNS_INTERPOLED: list[dict] = [
-    # Native depth-9 schedule (baseline).
+# Shared across INTERPOLED_MODELS (``model`` / run ``name`` filled in below).
+INTERPOLED_EXPERIMENTS: list[dict] = [
     {"name": "baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    # Single mid block spanning the whole stage-3 interval.
     {"name": "R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
     {"name": "R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
     {"name": "R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 1},
 ]
 
+INTERPOLED_MODEL_KEYS = ("convnext", "resnet50", "resnet101", "swin")
+
+
+def build_interpoled_runs(models: list[str], experiments: list[dict]) -> list[dict]:
+    runs: list[dict] = []
+    for model in models:
+        if model not in INTERPOLED_MODEL_KEYS:
+            raise ValueError(f"Unknown interpoled model {model!r}; expected one of {INTERPOLED_MODEL_KEYS}")
+        for exp in experiments:
+            run = dict(exp)
+            run["model"] = model
+            base = exp.get("name") or "run"
+            run["name"] = base if base.startswith(f"{model}_") else f"{model}_{base}"
+            runs.append(run)
+    return runs
+
+
 if BACKBONE == "shared":
-    CHECKPOINT = SHARED_CHECKPOINT
     OUT_DIR = OUT_DIR_SHARED
     RUNS = RUNS_SHARED
 elif BACKBONE == "interpoled":
-    CHECKPOINT = INTERPOLED_CHECKPOINT
     OUT_DIR = OUT_DIR_INTERPOLED
-    RUNS = RUNS_INTERPOLED
+    RUNS = build_interpoled_runs(INTERPOLED_MODELS, INTERPOLED_EXPERIMENTS)
 else:
     raise ValueError(f"Unknown BACKBONE={BACKBONE!r}; use 'shared' or 'interpoled'")
 
@@ -232,8 +254,84 @@ def load_interpoled_convnext(checkpoint: Path) -> InterpoledConvNextV1:
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     model.load_state_dict(state, strict=True)
     epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
-    print(f"Loaded interpoled {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
+    print(f"Loaded interpoled convnext {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
     return model
+
+
+def load_interpoled_model(model_key: str) -> nn.Module:
+    if model_key == "convnext":
+        if not INTERPOLED_CONVNEXT_CHECKPOINT.is_file():
+            raise FileNotFoundError(f"ConvNeXt checkpoint not found: {INTERPOLED_CONVNEXT_CHECKPOINT}")
+        return load_interpoled_convnext(INTERPOLED_CONVNEXT_CHECKPOINT)
+    if model_key == "resnet50":
+        model = InterpoledResNet50(weights="DEFAULT")
+        print(f"Loaded torchvision ResNet-50 DEFAULT, n_blocks={model.n_blocks}")
+        return model
+    if model_key == "resnet101":
+        model = InterpoledResNet101(weights="DEFAULT")
+        print(f"Loaded torchvision ResNet-101 DEFAULT, n_blocks={model.n_blocks}")
+        return model
+    if model_key == "swin":
+        model = InterpoledSwinT(weights="DEFAULT")
+        print(f"Loaded torchvision Swin-T DEFAULT, n_blocks={model.n_blocks}")
+        return model
+    raise ValueError(f"Unknown model_key={model_key!r}")
+
+
+class _NHWCBlockAsNCHW(nn.Module):
+    """Run an NHWC residual block with NCHW tensors (permute in/out)."""
+
+    def __init__(self, block: nn.Module):
+        super().__init__()
+        self.block = block
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.block(x.permute(0, 2, 3, 1).contiguous())
+        return y.permute(0, 3, 1, 2).contiguous()
+
+
+def stage3_n_blocks(model_key: str, model: nn.Module) -> int:
+    if model_key == "convnext":
+        return int(model.depths[2])
+    if model_key in ("resnet50", "resnet101"):
+        return int(model.n_blocks)
+    if model_key == "swin":
+        return int(model.n_blocks)
+    raise ValueError(model_key)
+
+
+def enter_stage3(model_key: str, model: nn.Module, batch: torch.Tensor) -> torch.Tensor:
+    """Map images → stage-3 feature state in NCHW."""
+    if model_key == "convnext":
+        return model.stage2(model.stage1(model.stem(batch)))
+    if model_key in ("resnet50", "resnet101"):
+        b = model.backbone
+        x = b.conv1(batch)
+        x = b.bn1(x)
+        x = b.relu(x)
+        x = b.maxpool(x)
+        x = b.layer1(x)
+        x = b.layer2(x)
+        return b.layer3[0](x)
+    if model_key == "swin":
+        x = batch
+        for i in range(InterpoledSwinT.STAGE3_INDEX):
+            x = model.backbone.features[i](x)
+        # features output is NHWC → NCHW for shared analysis code.
+        return x.permute(0, 3, 1, 2).contiguous()
+    raise ValueError(model_key)
+
+
+def stage3_field_blocks(model_key: str, model: nn.Module, blocks: list[int]) -> list[nn.Module]:
+    """Modules whose forward is residual ``x + f(x)``; used as ``h = block(x) - x``."""
+    if model_key == "convnext":
+        return [model.stage3[i] for i in blocks]
+    if model_key in ("resnet50", "resnet101"):
+        return [model.backbone.layer3[i + 1] for i in blocks]
+    if model_key == "swin":
+        stage3 = model.backbone.features[InterpoledSwinT.STAGE3_INDEX]
+        return [_NHWCBlockAsNCHW(stage3[i]) for i in blocks]
+    raise ValueError(model_key)
 
 
 def denormalize(img: torch.Tensor) -> torch.Tensor:
@@ -280,11 +378,21 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def trajectory_stats(model, field_blocks, indices, *, euler_step, method, batch_size, dataset):
+def trajectory_stats(
+    enter_fn,
+    field_blocks,
+    indices,
+    *,
+    euler_step,
+    method,
+    batch_size,
+    dataset,
+):
     """Integrate a sequence of residual fields and collect per-image dynamics + mean maps.
 
-    ``field_blocks[d]`` is the module used at step d (length D). Shared mode passes the
-    same block D times; interpoled mode passes ``stage3[i]`` for each schedule index.
+    ``enter_fn(batch)`` returns the stage-3 state in NCHW. ``field_blocks[d]`` is the
+    residual module at step d (``forward`` returns ``x + f(x)``). Shared mode passes
+    the same block D times; interpoled mode passes the scheduled stage-3 residuals.
 
     Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
     i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
@@ -328,7 +436,7 @@ def trajectory_stats(model, field_blocks, indices, *, euler_step, method, batch_
         batch_idx = indices[start : start + batch_size]
         batch = load_batch(batch_idx).to(device, non_blocking=True)
         bsz = batch.shape[0]
-        x = model.stage2(model.stage1(model.stem(batch)))
+        x = enter_fn(batch)
         if mean_x is None:
             mean_x = torch.zeros((D + 1, *x.shape[1:]), device=device)
             mean_h = torch.zeros_like(mean_x)
@@ -974,6 +1082,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
     config = {
         "name": res["name"],
         "backbone": BACKBONE,
+        "model": res.get("model"),
         "D": res["D"],
         "blocks": list(res.get("blocks") or []),
         "euler_step": res["euler_step"],
@@ -1667,24 +1776,29 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             step = model.stage3_length / D
         field_blocks = [model.deltifiedStage3[0]] * D
         blocks: list[int] | None = None
+        model_key = "shared_convnext"
         overlay_label = f"D={D}"
+        enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
         print(
             f"shared D={D} euler_step={step:.4g} method={method or 'RK1'} "
             f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
         )
     else:
-        blocks = resolve_blocks(spec, model.depths[2])
+        model_key = spec["model"]
+        n_blocks = stage3_n_blocks(model_key, model)
+        blocks = resolve_blocks(spec, n_blocks)
         step = float(spec["euler_step"])
-        field_blocks = [model.stage3[i] for i in blocks]
+        field_blocks = stage3_field_blocks(model_key, model, blocks)
         D = len(blocks)
         overlay_label = name
+        enter_fn = lambda batch, m=model, k=model_key: enter_stage3(k, m, batch)
         print(
-            f"interpoled schedule={blocks} (D={D}) euler_step={step:.4g} "
+            f"{model_key} schedule={blocks} (D={D}) euler_step={step:.4g} "
             f"method={method or 'RK1'} batch={spec['batch_size']} n={len(spec['image_indices'])}"
         )
 
     res = trajectory_stats(
-        model,
+        enter_fn,
         field_blocks,
         spec["image_indices"],
         euler_step=step,
@@ -1695,6 +1809,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     res["name"] = name
     res["spec"] = spec
     res["blocks"] = blocks
+    res["model"] = model_key
     res["overlay_label"] = overlay_label
 
     ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
@@ -1747,6 +1862,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     # Drop heavy maps before returning a light copy for overlay.
     light = {
         "name": res["name"],
+        "model": model_key,
         "D": res["D"],
         "blocks": blocks,
         "overlay_label": overlay_label,
@@ -1779,7 +1895,10 @@ def main() -> None:
         KEEP_FRAMES = True
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"device={device}  backbone={BACKBONE}  out={OUT_DIR}  checkpoint={CHECKPOINT}")
+    print(f"device={device}  backbone={BACKBONE}  out={OUT_DIR}")
+    if BACKBONE == "interpoled":
+        print(f"interpoled models={INTERPOLED_MODELS}")
+        print(f"convnext ckpt={INTERPOLED_CONVNEXT_CHECKPOINT}")
 
     dataset = ImageNetDataset(split=SPLIT, transforms=build_val_transforms())
     labels: list[int] = dataset.ds.data.column("label").to_pylist()
@@ -1800,26 +1919,32 @@ def main() -> None:
         who = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked"
         if BACKBONE == "shared":
             sched = f"D={spec['D']}"
-        elif "repeats" in spec:
-            sched = f"repeats={spec['repeats']} ES={spec['euler_step']:g}"
+            model_s = "shared_convnext"
         else:
-            sched = f"blocks={spec['blocks']} ES={spec['euler_step']:g}"
+            model_s = spec.get("model", "?")
+            if "repeats" in spec:
+                sched = f"repeats={spec['repeats']} ES={spec['euler_step']:g}"
+            else:
+                sched = f"blocks={spec['blocks']} ES={spec['euler_step']:g}"
         print(
-            f"  {spec['name']}: {who}, {sched}, n={len(spec['image_indices'])}, "
-            f"bs={spec['batch_size']}, fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}"
+            f"  {spec['name']}: model={model_s}, {who}, {sched}, "
+            f"n={len(spec['image_indices'])}, bs={spec['batch_size']}, "
+            f"fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}"
         )
 
     if args.list_only:
         return
 
-    if not CHECKPOINT.is_file():
-        raise SystemExit(f"checkpoint not found: {CHECKPOINT}")
-
+    models: dict[str, nn.Module] = {}
     if BACKBONE == "shared":
-        model = load_shared_convnext(CHECKPOINT).to(device).eval()
-        assert model.deltifiedStage3[0].eulerStep == 1.0
+        if not SHARED_CHECKPOINT.is_file():
+            raise SystemExit(f"checkpoint not found: {SHARED_CHECKPOINT}")
+        models["shared"] = load_shared_convnext(SHARED_CHECKPOINT).to(device).eval()
+        assert models["shared"].deltifiedStage3[0].eulerStep == 1.0
     else:
-        model = load_interpoled_convnext(CHECKPOINT).to(device).eval()
+        needed = sorted({r["model"] for r in runs})
+        for key in needed:
+            models[key] = load_interpoled_model(key).to(device).eval()
 
     completed: list[dict] = []
     for spec in runs:
@@ -1827,19 +1952,22 @@ def main() -> None:
         if args.skip_existing and marker.is_file():
             print(f"skip existing {spec['name']}")
             continue
+        if BACKBONE == "shared":
+            model = models["shared"]
+        else:
+            model = models[spec["model"]]
         completed.append(run_one(model, dataset, class_names, spec))
 
     if SCATTER_OVERLAY_BY_D and completed:
         by_key: dict[tuple, list[dict]] = {}
         for res in completed:
-            key = (tuple(res["mean_x"].shape[1:]), res["n_images"])
+            key = (res.get("model"), tuple(res["mean_x"].shape[1:]), res["n_images"])
             by_key.setdefault(key, []).append(res)
         for group in by_key.values():
             if len(group) < 2:
                 continue
             group = sorted(group, key=lambda r: (r["D"], r["name"]))
             tag = "-".join(r.get("overlay_label", str(r["D"])) for r in group)
-            # Keep filename short / filesystem-safe.
             tag = tag.replace(" ", "_").replace("/", "div")[:120]
             out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
             scatter_overlay_by_d(group, path=out, channel=SCATTER_CHANNEL)

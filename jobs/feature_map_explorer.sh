@@ -10,15 +10,18 @@
 #SBATCH --output=logs/feature_map_explorer_%j.out
 #SBATCH --error=logs/feature_map_explorer_%j.err
 
-# Stage-3 feature-map trajectories. Backbone / experiment list live in
-# scripts/feature_map_explorer.py (BACKBONE, RUNS_SHARED / RUNS_INTERPOLED).
+# Stage-3 feature-map trajectories. Config lives in
+# scripts/feature_map_explorer.py:
+#   BACKBONE = "shared" | "interpoled"
+#   INTERPOLED_MODELS = ["convnext", "resnet50", "resnet101", "swin"]
+#   INTERPOLED_EXPERIMENTS = [...]
 #
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 #
 # Optional overrides:
-#   TRAIN_ARGS='--list-only'           # print resolved runs
-#   TRAIN_ARGS='--only B6_ES9_c289_n1'
+#   TRAIN_ARGS='--list-only'
+#   TRAIN_ARGS='--only resnet50_baseline_R1_ES1_c289_n1 swin_R2_ES0.5_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
 #   TRAIN_ARGS='--keep-frames'
 
