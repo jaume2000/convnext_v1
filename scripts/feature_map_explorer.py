@@ -85,18 +85,25 @@ MAX_IMAGES_PER_CLASS: int | None = 100
 BATCH_SIZE = 8
 FPS = 10.0
 
-# Shared ConvNeXt: baseline D=9 + R100 at ES=0.01 / 0.1, ± ignore top-1 channel.
-_FM_COMMON = {"class_id": 289, "max_images": 1, "batch_size": 1, "method": None}
+# Shared ConvNeXt feature maps (same last.pth as shared_convnext_ablation).
+_FM_COMMON = {"class_id": 289, "max_images": 1, "batch_size": 1}
 RUNS_SHARED: list[dict] = [
-    {"name": "shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, **_FM_COMMON},
-    {"name": "shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, **_FM_COMMON},
-    {"name": "shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, **_FM_COMMON},
-    {"name": "shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, **_FM_COMMON},
-    {"name": "shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, **_FM_COMMON},
-    {"name": "shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, **_FM_COMMON},
+    # Baseline D=9 ES=1 ± ignore (Euler).
+    {"name": "shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
+    {"name": "shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    # R100-style refined / large-step Euler.
+    {"name": "shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
+    {"name": "shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    {"name": "shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
+    {"name": "shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    {"name": "shared_D100_ES1_c289_n1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
+    {"name": "shared_D100_ES1_c289_n1_ignore1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    # RK4 probe at refined step (vs Euler D100 ES=0.01).
+    {"name": "shared_D100_ES0.01_RK4_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": "RK4", **_FM_COMMON},
+    {"name": "shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_FM_COMMON},
 ]
 
-# Interpoled: same 6 schedules × each model (baseline ± ignore, R100 ES=0.01/0.1 ± ignore).
+# Interpoled: core schedules × each model, then ConvNeXt RK4 probes.
 _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("baseline_R1_ES1_c289_n1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0}),
     ("baseline_R1_ES1_c289_n1_ignore1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1}),
@@ -104,6 +111,8 @@ _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("R100_ES0.01_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1}),
     ("R100_ES0.1_c289_n1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0}),
     ("R100_ES0.1_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1}),
+    ("R100_ES1_c289_n1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES1_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
 ]
 INTERPOLED_EXPERIMENTS: list[dict] = [
     {
@@ -116,6 +125,23 @@ INTERPOLED_EXPERIMENTS: list[dict] = [
     }
     for model in INTERPOLED_MODELS
     for suffix, kw in _FM_INTERP_SPECS
+]
+# RK4 probe: R100 ES=0.01 on both ConvNeXt checkpoints (± ignore).
+INTERPOLED_EXPERIMENTS += [
+    {
+        "model": model,
+        "name": f"{model}_R100_ES0.01_RK4_c289_n1{sfx}",
+        "repeats": 100,
+        "euler_step": 0.01,
+        "method": "RK4",
+        "class_id": 289,
+        "max_images": 1,
+        "batch_size": 1,
+        "fps": 80,
+        "ignore_top_k_channels": ign,
+    }
+    for model in ("convnext", "convnext_droppath0")
+    for sfx, ign in (("", 0), ("_ignore1", 1))
 ]
 
 INTERPOLED_MODEL_KEYS = (

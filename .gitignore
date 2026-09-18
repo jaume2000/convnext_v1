@@ -1,4 +1,5 @@
 .env.*
 .env
 outputs/*
+old/*
 __pycache__/

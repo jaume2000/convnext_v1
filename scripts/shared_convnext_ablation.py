@@ -22,8 +22,9 @@ from utils.env import load_dotenv
 
 # --- Experiment config (edit here) ---
 EXPERIMENT_NAME = "sharedConvnextAblation"
-CHECKPOINT = Path("outputs/shared_convnextv1_imagenet/weights/last.pth")
-OUTPUT_DIR = Path("outputs") / EXPERIMENT_NAME
+# Same checkpoint as scripts/feature_map_explorer.py SHARED_CHECKPOINT.
+CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
+OUTPUT_DIR = _REPO_ROOT / "outputs" / EXPERIMENT_NAME
 
 BATCH_SIZE = 1024
 NUM_WORKERS = 16
@@ -74,6 +75,39 @@ def build_configurations(
     n_blocks: int,
     tail: list[int],
 ) -> list[tuple[str, CustomForwardConfig | None]]:
+    """Active shared grid aligned with interpoled RK interpolation scripts.
+
+    D applications of the shared residual with ES=1/D × RK1/2/4, plus the same
+    extras (D10 ES=0.1 all RKs; D10/D100 ES=1 Euler-only).
+    """
+    repeats = [1, 2, 4, 8, 16, 32, 64, 128]
+    methods = ["RK1", "RK2", "RK4"]
+    configs: list[tuple[str, CustomForwardConfig | None]] = []
+    for d in repeats:
+        for method in methods:
+            es = 1 / d
+            name = f"D{d}_ES{es:g}_{method}"
+            configs.append((name, cfg(tail, [0] * d, euler_step=es, method=method)))
+    for method in methods:
+        configs.append(
+            (f"D10_ES0.1_{method}", cfg(tail, [0] * 10, euler_step=0.1, method=method))
+        )
+    for method in methods:
+        configs.append(
+            (f"D100_ES0.01_{method}", cfg(tail, [0] * 100, euler_step=0.01, method=method))
+        )
+    configs.append(("D10_ES1_RK1", cfg(tail, [0] * 10, euler_step=1.0, method="RK1")))
+    configs.append(("D100_ES1_RK1", cfg(tail, [0] * 100, euler_step=1.0, method="RK1")))
+    # Native shared depth (9 residual apps) for direct baseline reference.
+    configs.append(("D9_ES1_RK1", cfg(tail, [0] * n_blocks, euler_step=1.0, method="RK1")))
+    return configs
+
+
+def build_configurations_old(
+    n_blocks: int,
+    tail: list[int],
+) -> list[tuple[str, CustomForwardConfig | None]]:
+    """Previous large ablation sweep (kept for reference; not used by main)."""
     return [
         ("-----------------", None),
         ("baseline (forward)", cfg(tail, list(range(n_blocks)))),
@@ -147,7 +181,6 @@ def build_configurations(
         ("D=256, ES=9/256 RK2", cfg(tail, [0] * 256, euler_step=9 / 256, method="RK2")),
         ("D=512, ES=9/512 RK2", cfg(tail, [0] * 512, euler_step=9 / 512, method="RK2")),
         ("D=1024, ES=9/1024 RK2", cfg(tail, [0] * 1024, euler_step=9 / 1024, method="RK2")),
-
         ("-----------------", None),
         ("D=1, ES=9/1 RK4", cfg(tail, [0] * 1, euler_step=9 / 1, method="RK4")),
         ("D=2, ES=9/2 RK4", cfg(tail, [0] * 2, euler_step=9 / 2, method="RK4")),
@@ -181,7 +214,6 @@ def build_configurations(
         ("D=9, ES=8.0", cfg(tail, list(range(n_blocks)), euler_step=8.0)),
         ("D=9, ES=16.0", cfg(tail, list(range(n_blocks)), euler_step=16.0)),
         ("-----------------", None),
-
         ("D=45, ES=9/2.5", cfg(tail, list(range(n_blocks)), euler_step=9 / 2.5)),
         ("D=45, ES=9/5", cfg(tail, list(range(n_blocks)), euler_step=9 / 5)),
         ("D=45, ES=9/11", cfg(tail, list(range(n_blocks)), euler_step=9 / 11)),
