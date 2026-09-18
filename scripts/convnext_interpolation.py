@@ -26,11 +26,32 @@ from utils.env import load_dotenv
 
 load_dotenv()
 
-CHECKPOINT = _REPO_ROOT / "outputs" / "convnextv1_imagenet" / "weights" / "last.pth"
-OUTPUT_PATH = _REPO_ROOT / "outputs" / "convnext_interpolation"
+CHECKPOINT = _REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"
+OUTPUT_PATH = _REPO_ROOT / "outputs" / "convnext_interpolation_droppath0"
 BATCH_SIZE = 128
 
 EXPERIMENTS = [
+    # Trying several euler steps for block 6
+    {"name": "B6_ES0.1", "blocks": [6], "euler_step": 0.1},
+    {"name": "B6_ES0.25", "blocks": [6], "euler_step": 0.25},
+    {"name": "B6_ES0.5", "blocks": [6], "euler_step": 0.5},
+    {"name": "B6_ES0.75", "blocks": [6], "euler_step": 0.75},
+    {"name": "B6_ES1", "blocks": [6], "euler_step": 1},
+    {"name": "B6_ES1.25", "blocks": [6], "euler_step": 1.25},
+    {"name": "B6_ES1.5", "blocks": [6], "euler_step": 1.5},
+    {"name": "B6_ES2", "blocks": [6], "euler_step": 2},
+    {"name": "B6_ES3", "blocks": [6], "euler_step": 3},
+    {"name": "B6_ES4", "blocks": [6], "euler_step": 4},
+    {"name": "B6_ES5", "blocks": [6], "euler_step": 5},
+    {"name": "B6_ES6", "blocks": [6], "euler_step": 6},
+    {"name": "B6_ES7", "blocks": [6], "euler_step": 7},
+    {"name": "B6_ES8", "blocks": [6], "euler_step": 8},
+    {"name": "B6_ES9", "blocks": [6], "euler_step": 9},
+    {"name": "B6_ES12", "blocks": [6], "euler_step": 12},
+    {"name": "B6_ES16", "blocks": [6], "euler_step": 16},
+    {"name": "B6_ES20", "blocks": [6], "euler_step": 20},
+]
+[
     # Single residual, one giant Euler step (integrate the whole stage-3 interval).
     {"name": "B0_ES9", "blocks": [0], "euler_step": 9},
     {"name": "B1_ES9", "blocks": [1], "euler_step": 9},
@@ -51,6 +72,8 @@ EXPERIMENTS = [
     {"name": "B6_ES1", "blocks": [6], "euler_step": 1},
     {"name": "B7_ES1", "blocks": [7], "euler_step": 1},
     {"name": "B8_ES1", "blocks": [8], "euler_step": 1},
+
+
     # Two residuals, half the original depth each.
     {"name": "B0-8_ES4.5", "blocks": [0, 8], "euler_step": 9 / 2},
     {"name": "B1-7_ES4.5", "blocks": [1, 7], "euler_step": 9 / 2},
@@ -61,6 +84,16 @@ EXPERIMENTS = [
     {"name": "B6-2_ES4.5", "blocks": [6, 2], "euler_step": 9 / 2},
     {"name": "B7-1_ES4.5", "blocks": [7, 1], "euler_step": 9 / 2},
     {"name": "B8-0_ES4.5", "blocks": [8, 0], "euler_step": 9 / 2},
+    # Two residuals, ES= 1
+    {"name": "B0-8_ES1", "blocks": [0, 8], "euler_step": 1},
+    {"name": "B1-7_ES1", "blocks": [1, 7], "euler_step": 1},
+    {"name": "B2-6_ES1", "blocks": [2, 6], "euler_step": 1},
+    {"name": "B3-5_ES1", "blocks": [3, 5], "euler_step": 1},
+    {"name": "B4-4_ES1", "blocks": [4, 4], "euler_step": 1},
+    {"name": "B5-3_ES1", "blocks": [5, 3], "euler_step": 1},
+    {"name": "B6-2_ES1", "blocks": [6, 2], "euler_step": 1},
+    {"name": "B7-1_ES1", "blocks": [7, 1], "euler_step": 1},
+    {"name": "B8-0_ES1", "blocks": [8, 0], "euler_step": 1},
     # Ends + middle, varying step.
     {"name": "B0-4-8_ES4.5", "blocks": [0, 4, 8], "euler_step": 9 / 2},
     {"name": "B0-4-8_ES3", "blocks": [0, 4, 8], "euler_step": 9 / 3},
@@ -75,6 +108,11 @@ EXPERIMENTS = [
     {"name": "R4_ES0.25", "repeats": 4, "euler_step": 0.25},
     {"name": "R10_ES0.1", "repeats": 10, "euler_step": 0.1},
     {"name": "R100_ES0.01", "repeats": 100, "euler_step": 0.01},
+    # All 9 residuals, unit step.
+    {"name": "R2_ES1", "repeats": 2, "euler_step": 1},
+    {"name": "R4_ES1", "repeats": 4, "euler_step": 1},
+    {"name": "R10_ES1", "repeats": 10, "euler_step": 1},
+    {"name": "R100_ES1", "repeats": 100, "euler_step": 1},
 ]
 
 
