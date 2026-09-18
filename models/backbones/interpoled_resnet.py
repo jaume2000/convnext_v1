@@ -1,36 +1,37 @@
-"""ResNet-50 with a configurable stage-3 residual schedule (Euler-scaled)."""
+"""ResNet-50 / ResNet-101 with a configurable stage-3 residual schedule (Euler-scaled)."""
 
 from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import ResNet50_Weights, resnet50
+from torchvision.models import (
+    ResNet50_Weights,
+    ResNet101_Weights,
+    resnet50,
+    resnet101,
+)
 
 
-class InterpoledResNet50(nn.Module):
-    """Pretrained ResNet-50 with a configurable stage-3 residual schedule.
+class InterpoledResNet(nn.Module):
+    """Pretrained ResNet with a configurable stage-3 residual schedule.
 
-    ``layer3`` has 6 Bottlenecks: index 0 downsamples (stride-2 + channel expand)
-    and always runs once. Indices 1..5 are identity residuals and are the ones
-    scheduled via ``blocks`` / ``euler_step``:
+    ``layer3[0]`` downsamples (stride-2 + channel expand) and always runs once.
+    The remaining identity Bottlenecks are scheduled via ``blocks`` / ``euler_step``:
 
         x <- x + euler_step * (layer3[i](x) - x)
 
-    ``blocks`` indexes those identity residuals as 0..4 (mapping to layer3[1..5]).
-    Module weights stay identical to torchvision ``resnet50``.
+    ``blocks`` indexes those identity residuals as ``0 .. n_blocks-1``
+    (mapping to ``layer3[1 ..]``). Weights stay identical to torchvision.
     """
 
     def __init__(
         self,
+        backbone: nn.Module,
         blocks: list[int] | None = None,
         euler_step: float = 1.0,
-        weights: ResNet50_Weights | str | None = ResNet50_Weights.DEFAULT,
     ):
         super().__init__()
-        if isinstance(weights, str):
-            weights = ResNet50_Weights[weights]
-        self.backbone = resnet50(weights=weights)
-        # Identity residuals only (skip the downsample head of layer3).
+        self.backbone = backbone
         self.n_blocks = len(self.backbone.layer3) - 1
         self.euler_step = euler_step
         self.blocks = list(range(self.n_blocks)) if blocks is None else list(blocks)
@@ -50,7 +51,6 @@ class InterpoledResNet50(nn.Module):
         x = b.maxpool(x)
         x = b.layer1(x)
         x = b.layer2(x)
-        # Stage-3 downsample head (always once).
         x = b.layer3[0](x)
         for i in self.blocks:
             blk = b.layer3[i + 1]
@@ -60,3 +60,31 @@ class InterpoledResNet50(nn.Module):
         x = torch.flatten(x, 1)
         x = b.fc(x)
         return x
+
+
+class InterpoledResNet50(InterpoledResNet):
+    """ResNet-50: 5 schedulable identity residuals in stage 3 (layer3[1..5])."""
+
+    def __init__(
+        self,
+        blocks: list[int] | None = None,
+        euler_step: float = 1.0,
+        weights: ResNet50_Weights | str | None = ResNet50_Weights.DEFAULT,
+    ):
+        if isinstance(weights, str):
+            weights = ResNet50_Weights[weights]
+        super().__init__(resnet50(weights=weights), blocks=blocks, euler_step=euler_step)
+
+
+class InterpoledResNet101(InterpoledResNet):
+    """ResNet-101: 22 schedulable identity residuals in stage 3 (layer3[1..22])."""
+
+    def __init__(
+        self,
+        blocks: list[int] | None = None,
+        euler_step: float = 1.0,
+        weights: ResNet101_Weights | str | None = ResNet101_Weights.DEFAULT,
+    ):
+        if isinstance(weights, str):
+            weights = ResNet101_Weights[weights]
+        super().__init__(resnet101(weights=weights), blocks=blocks, euler_step=euler_step)
