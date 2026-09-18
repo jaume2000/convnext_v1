@@ -90,7 +90,8 @@ RUNS_INTERPOLED: list[dict] = [
     {"name": "baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
     # Single mid block spanning the whole stage-3 interval.
     {"name": "R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"name": "R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"name": "R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"name": "R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 1},
 ]
 
 if BACKBONE == "shared":
