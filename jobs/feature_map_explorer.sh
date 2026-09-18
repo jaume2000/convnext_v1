@@ -82,6 +82,11 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
+# torchvision ImageNet weights (preload on login; compute nodes have no net)
+export TORCH_HOME="${TORCH_HOME:-${WORK:+$WORK/torch}}"
+export TORCH_HOME="${TORCH_HOME:-${CINECA_SCRATCH:-$HOME}/torch}"
+export TORCH_HOME="${TORCH_HOME/#\~/$HOME}"
+
 DATASET_DIR="ILSVRC___imagenet-1k"
 if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   echo "ImageNet cache not found at ${HF_DATASETS_CACHE}/${DATASET_DIR}" >&2
@@ -103,6 +108,7 @@ echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
 echo "Python: $(which python)"
 echo "HF cache: ${HF_DATASETS_CACHE}"
+echo "TORCH_HOME: ${TORCH_HOME}"
 echo "Shared ckpt: ${SHARED_CKPT} ($([ -f "${SHARED_CKPT}" ] && echo ok || echo missing))"
 echo "Interpoled ckpt: ${INTERPOLED_CKPT} ($([ -f "${INTERPOLED_CKPT}" ] && echo ok || echo missing))"
 echo "Script: ${SCRIPT}"
