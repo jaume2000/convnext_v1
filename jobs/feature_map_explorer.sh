@@ -10,15 +10,15 @@
 #SBATCH --output=logs/feature_map_explorer_%j.out
 #SBATCH --error=logs/feature_map_explorer_%j.err
 
-# Stage-3 feature-map trajectories (shared D=9 checkpoint). Experiment list lives in
-# scripts/feature_map_explorer.py (RUNS / VIDEO_MAPS).
+# Stage-3 feature-map trajectories. Backbone / experiment list live in
+# scripts/feature_map_explorer.py (BACKBONE, RUNS_SHARED / RUNS_INTERPOLED).
 #
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 #
 # Optional overrides:
 #   TRAIN_ARGS='--list-only'           # print resolved runs
-#   TRAIN_ARGS='--only D9_rk1_c289_n1_bs1'
+#   TRAIN_ARGS='--only B6_ES9_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
 #   TRAIN_ARGS='--keep-frames'
 
@@ -85,9 +85,12 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   exit 1
 fi
 
-PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-if [[ ! -f "${PRETRAINED}" ]]; then
-  echo "Shared D=9 checkpoint not found at ${PRETRAINED}" >&2
+SHARED_CKPT="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
+INTERPOLED_CKPT="${PROJECT_ROOT}/outputs/convnextv1_imagenet_droppath0/weights/last.pth"
+if [[ ! -f "${SHARED_CKPT}" && ! -f "${INTERPOLED_CKPT}" ]]; then
+  echo "No feature-map checkpoint found (expected shared and/or interpoled)." >&2
+  echo "  shared:     ${SHARED_CKPT}" >&2
+  echo "  interpoled: ${INTERPOLED_CKPT}" >&2
   exit 1
 fi
 
@@ -97,7 +100,8 @@ echo "Host: $(hostname)"
 echo "Project: ${PROJECT_ROOT}"
 echo "Python: $(which python)"
 echo "HF cache: ${HF_DATASETS_CACHE}"
-echo "Checkpoint: ${PRETRAINED}"
+echo "Shared ckpt: ${SHARED_CKPT} ($([ -f "${SHARED_CKPT}" ] && echo ok || echo missing))"
+echo "Interpoled ckpt: ${INTERPOLED_CKPT} ($([ -f "${INTERPOLED_CKPT}" ] && echo ok || echo missing))"
 echo "Script: ${SCRIPT}"
 echo "Args: ${TRAIN_ARGS:-}"
 echo "ffmpeg: $(command -v ffmpeg || echo missing)"

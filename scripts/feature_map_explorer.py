@@ -1,8 +1,8 @@
-"""Stage-3 feature-map trajectories on the shared D=9 ConvNeXt checkpoint.
+"""Stage-3 feature-map trajectories for shared or interpoled ConvNeXt.
 
-Headless port of notebooks/featureMapExplorer.ipynb for Leonardo. Processes one
-RUN at a time, writes under outputs/featureMaps/<run name>/, and prefers mp4
-over giant in-memory GIFs (the notebook crash mode on a laptop).
+Shared mode (``BACKBONE = "shared"``): integrates one shared residual ``D`` times
+(DeltaConvNext checkpoint). Interpoled mode (``BACKBONE = "interpoled"``): walks a
+stage-3 ``blocks`` / ``repeats`` schedule like ``scripts/convnext_interpolation.py``.
 
 Submit:
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
@@ -10,7 +10,7 @@ Submit:
 Or locally:
   python scripts/feature_map_explorer.py
   python scripts/feature_map_explorer.py --list-only
-  python scripts/feature_map_explorer.py --only D9_rk1_c289_n1_bs1
+  python scripts/feature_map_explorer.py --only B6_ES9_c289_n1
 """
 
 from __future__ import annotations
@@ -42,11 +42,19 @@ from tqdm import tqdm
 from data.imagenet import ImageNetDataset
 from data.transforms.transforms import IMAGENET_MEAN, IMAGENET_STD, build_val_transforms
 from models.backbones.delta_convnext import DeltaConvNext
+from models.backbones.interpoled_convnext import InterpoledConvNextV1
 from utils.env import load_dotenv
 
 # --------------------------------------------------------------------------- config
-CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
-OUT_DIR = _REPO_ROOT / "outputs" / "featureMaps"
+# "shared" = DeltaConvNext shared residual × D; "interpoled" = distinct stage-3 blocks.
+BACKBONE = "interpoled"  # "shared" | "interpoled"
+
+SHARED_CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
+INTERPOLED_CHECKPOINT = (
+    _REPO_ROOT / "outputs" / "convnextv1_imagenet" / "weights" / "last.pth"
+)
+OUT_DIR_SHARED = _REPO_ROOT / "outputs" / "featureMaps"
+OUT_DIR_INTERPOLED = _REPO_ROOT / "outputs" / "featureMaps_interpoled"
 
 SPLIT = "validation"
 IMAGE_INDICES = [0, 17, 4242]
@@ -56,9 +64,8 @@ MAX_IMAGES_PER_CLASS: int | None = 100
 BATCH_SIZE = 8
 FPS = 10.0
 
-# Edit this list for the experiments to run on Leonardo.
-# Optional per-run field: ignore_top_k_channels (default = IGNORE_TOP_K_CHANNELS below).
-RUNS: list[dict] = [
+# Shared-backbone runs (D + optional euler_step / method).
+RUNS_SHARED: list[dict] = [
     {"name": "D100_rk1_c7_n50_bs16_no_ignore", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 0},
     {"name": "D100_rk1_c7_n50_bs16", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
     {"name": "D100_rk1_c7_n1_bs1", "D": 100, "method": None, "class_id": 7, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
@@ -76,6 +83,27 @@ RUNS: list[dict] = [
     {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
 ]
 
+# Interpoled ConvNeXt-T runs: ``blocks`` XOR ``repeats``, plus ``euler_step``
+# (same semantics as scripts/convnext_interpolation.py).
+RUNS_INTERPOLED: list[dict] = [
+    # Native depth-9 schedule (baseline).
+    {"name": "baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
+    # Single mid block spanning the whole stage-3 interval.
+    {"name": "R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+    {"name": "R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
+]
+
+if BACKBONE == "shared":
+    CHECKPOINT = SHARED_CHECKPOINT
+    OUT_DIR = OUT_DIR_SHARED
+    RUNS = RUNS_SHARED
+elif BACKBONE == "interpoled":
+    CHECKPOINT = INTERPOLED_CHECKPOINT
+    OUT_DIR = OUT_DIR_INTERPOLED
+    RUNS = RUNS_INTERPOLED
+else:
+    raise ValueError(f"Unknown BACKBONE={BACKBONE!r}; use 'shared' or 'interpoled'")
+
 CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
 # Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
@@ -92,6 +120,8 @@ GRID_MAX_FRAMES = 36
 SCATTER_MAX_POINTS = 99999999
 # None = all channels in static scatter; int = that channel only.
 SCATTER_CHANNEL: int | None = None
+# Overlay per-channel spatial means as X markers on top of scatter clouds.
+PLOT_CHANNEL_MEAN = True
 # After all RUNS, write a combined residual scatter coloured/legended by D.
 SCATTER_OVERLAY_BY_D = True
 # Animation: sample N features once, track the same indices across depth.
@@ -140,7 +170,14 @@ def run_folder_name(spec: dict) -> str:
     if spec.get("name"):
         return spec["name"]
     method = (spec.get("method") or "RK1").lower()
-    parts = [f"D{spec['D']}_{method}"]
+    if "D" in spec:
+        parts = [f"D{spec['D']}_{method}"]
+    elif "repeats" in spec:
+        parts = [f"R{spec['repeats']}_ES{spec['euler_step']:g}"]
+    elif "blocks" in spec:
+        parts = [f"B{'-'.join(map(str, spec['blocks']))}_ES{spec['euler_step']:g}"]
+    else:
+        raise ValueError("run needs name, or D / blocks / repeats")
     class_id = spec.get("class_id", CLASS_ID)
     max_images = spec.get("max_images", MAX_IMAGES_PER_CLASS)
     batch_size = spec.get("batch_size", BATCH_SIZE)
@@ -152,7 +189,26 @@ def run_folder_name(spec: dict) -> str:
             parts.append(f"n{max_images}")
     if batch_size is not None:
         parts.append(f"bs{batch_size}")
-    return "_".join(parts)
+    return "_".join(parts).replace("/", "div")
+
+
+def resolve_blocks(spec: dict, n_blocks: int) -> list[int]:
+    """``blocks`` XOR ``repeats`` → stage-3 residual index schedule (like interpolation)."""
+    if "blocks" in spec and "repeats" in spec:
+        raise ValueError("Specify either blocks or repeats, not both")
+    if "blocks" in spec:
+        blocks = list(spec["blocks"])
+    else:
+        repeats = spec.get("repeats")
+        if repeats is None:
+            raise ValueError("Interpoled run needs blocks or repeats")
+        blocks = [i for i in range(n_blocks) for _ in range(int(repeats))]
+    bad = [i for i in blocks if not 0 <= i < n_blocks]
+    if bad:
+        raise ValueError(f"block indices {bad} out of range [0, {n_blocks})")
+    if not blocks:
+        raise ValueError("empty block schedule")
+    return blocks
 
 
 def load_shared_convnext(checkpoint: Path) -> DeltaConvNext:
@@ -165,7 +221,17 @@ def load_shared_convnext(checkpoint: Path) -> DeltaConvNext:
     if stale or unexpected:
         raise RuntimeError(f"missing={stale} unexpected={unexpected}")
     epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
-    print(f"Loaded {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
+    print(f"Loaded shared {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
+    return model
+
+
+def load_interpoled_convnext(checkpoint: Path) -> InterpoledConvNextV1:
+    model = InterpoledConvNextV1()
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    model.load_state_dict(state, strict=True)
+    epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
+    print(f"Loaded interpoled {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
     return model
 
 
@@ -213,13 +279,19 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, batch_size, dataset):
-    """Integrate the shared block and collect per-image dynamics + mean maps.
+def trajectory_stats(model, field_blocks, indices, *, euler_step, method, batch_size, dataset):
+    """Integrate a sequence of residual fields and collect per-image dynamics + mean maps.
+
+    ``field_blocks[d]`` is the module used at step d (length D). Shared mode passes the
+    same block D times; interpoled mode passes ``stage3[i]`` for each schedule index.
 
     Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
     i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
     """
     method = method.upper() if isinstance(method, str) else method
+    D = len(field_blocks)
+    if D < 1:
+        raise ValueError("field_blocks must be non-empty")
     n = len(indices)
     w = 1.0 / n
     es = float(euler_step)
@@ -240,8 +312,11 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
     pr_depth_i = torch.zeros(n, dtype=torch.float64)
     pr_spatial_i = torch.zeros(n, dtype=torch.float64)
 
-    def f(y):
-        return shared_block(y) - y
+    def field_at(block):
+        def f(y):
+            return block(y) - y
+
+        return f
 
     def load_batch(idxs: list[int]) -> torch.Tensor:
         return torch.stack([dataset[i][0] for i in idxs])
@@ -261,15 +336,22 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             norm_map_h = torch.zeros((D + 1, *x.shape[2:]), device=device)
             l2_map_h = torch.zeros((D, *x.shape[2:]), device=device)
 
-        # Per-image residual trajectory for SVD / rectitude: [B, D+1, C, H, W] is heavy;
-        # keep flattened [B, D+1, dim] on CPU.
-        h = f(x)
+        # Per-image residual trajectory for SVD / rectitude.
+        f0 = field_at(field_blocks[0])
+        h = f0(x)
         x0 = x.detach()
         h0_flat = h.flatten(1).detach()
         H_rows: list[torch.Tensor] = []
         path_len = torch.zeros(bsz, dtype=torch.float64, device=device)
 
         for d in range(D + 1):
+            # At state d, evaluate the field of the block that acts at this index
+            # (last block again after the final step, matching shared-mode storage).
+            block = field_blocks[min(d, D - 1)]
+            f = field_at(block)
+            if d > 0:
+                h = f(x)
+
             mean_x[d] += w * x.sum(0)
             mean_h[d] += w * h.sum(0)
             norm_map_h[d] += w * h.norm(dim=1).sum(0)
@@ -289,8 +371,10 @@ def trajectory_stats(model, shared_block, indices, *, D, euler_step, method, bat
             if d == D:
                 break
 
-            x_next = rk_step(f, x, euler_step, method, k1=h)
-            h_next = f(x_next)
+            # Transition d → d+1 uses field_blocks[d] (h already matches for Euler).
+            f_step = field_at(field_blocks[d])
+            x_next = rk_step(f_step, x, euler_step, method, k1=h)
+            h_next = field_at(field_blocks[min(d + 1, D - 1)])(x_next)
             h_next_flat = h_next.flatten(1)
             x_next_flat = x_next.flatten(1)
 
@@ -888,7 +972,9 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         res["scalars"].to_csv(run_dir / "table_scalars.csv", index=False)
     config = {
         "name": res["name"],
+        "backbone": BACKBONE,
         "D": res["D"],
+        "blocks": list(res.get("blocks") or []),
         "euler_step": res["euler_step"],
         "method": res["method"] or "RK1",
         "split": SPLIT,
@@ -916,6 +1002,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "PR_depth_on_mean_traj": res.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": res.get("PR_spatial_on_mean_traj"),
         "scatter_channel": SCATTER_CHANNEL,
+        "plot_channel_mean": PLOT_CHANNEL_MEAN,
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     if SAVE_TENSORS:
@@ -1027,6 +1114,38 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     )
 
 
+def _channel_spatial_means(maps: torch.Tensor) -> torch.Tensor:
+    """Per-depth, per-channel mean over H×W. ``maps`` is (T, C, H, W) → (T, C)."""
+    return maps.flatten(2).mean(-1)
+
+
+def _scatter_channel_mean_markers(
+    ax: plt.Axes,
+    xs,
+    ys,
+    *,
+    color=None,
+    cmap_color=None,
+    label: str | None = None,
+) -> None:
+    """Draw channel-mean markers on top of a scatter cloud."""
+    if not PLOT_CHANNEL_MEAN:
+        return
+    if color is None:
+        color = cmap_color if cmap_color is not None else "black"
+    ax.scatter(
+        xs,
+        ys,
+        marker="x",
+        s=48,
+        linewidths=1.4,
+        alpha=1.0,
+        zorder=6,
+        color=color,
+        label=label,
+    )
+
+
 def scatter_io(
     inputs: torch.Tensor,
     outputs: torch.Tensor,
@@ -1061,11 +1180,14 @@ def scatter_io(
     cmap = plt.cm.viridis
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
+    mean_in = _channel_spatial_means(inputs)
+    mean_out = _channel_spatial_means(outputs)
     lo = min(flat_in.min().item(), flat_out.min().item())
     hi = max(flat_in.max().item(), flat_out.max().item())
     if draw_y_equals_x:
         ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    mean_labeled = False
     for d in range(n):
         a = flat_in[d]
         b = flat_out[d]
@@ -1087,6 +1209,18 @@ def scatter_io(
             if label is not None
             else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
             **c_kw,
+        )
+        mean_label = None
+        if PLOT_CHANNEL_MEAN and not mean_labeled and label is None:
+            mean_label = "channel mean"
+            mean_labeled = True
+        _scatter_channel_mean_markers(
+            ax,
+            mean_in[d].numpy(),
+            mean_out[d].numpy(),
+            color=color,
+            cmap_color=None if color is not None else cmap(d / max(n - 1, 1)),
+            label=mean_label,
         )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -1146,7 +1280,7 @@ def scatter_overlay_by_d(
             max_points=max_points,
             channel=channel,
             draw_y_equals_x=False,
-            label=f"D={res['D']}",
+            label=res.get("overlay_label", f"D={res['D']}"),
             ax=ax,
             color=color,
         )
@@ -1231,13 +1365,19 @@ def scatter_vs_channel(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
+    ch_means = _channel_spatial_means(maps)
+    ch_axis = np.arange(n_c, dtype=np.float64)
     lo = vals.min().item()
     hi = vals.max().item()
+    if PLOT_CHANNEL_MEAN:
+        lo = min(lo, ch_means.min().item())
+        hi = max(hi, ch_means.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
     cmap = plt.cm.viridis
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    mean_labeled = False
     for d in range(n):
         ax.scatter(
             ch_plot,
@@ -1247,6 +1387,16 @@ def scatter_vs_channel(
             c=[cmap(d / max(n - 1, 1))],
             linewidths=0,
             label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+        )
+        mean_label = "channel mean" if PLOT_CHANNEL_MEAN and not mean_labeled else None
+        if mean_label is not None:
+            mean_labeled = True
+        _scatter_channel_mean_markers(
+            ax,
+            ch_axis,
+            ch_means[d].numpy(),
+            cmap_color=cmap(d / max(n - 1, 1)),
+            label=mean_label,
         )
     ax.set_xlabel("channel")
     ax.set_ylabel(ylabel)
@@ -1280,8 +1430,13 @@ def scatter_vs_channel_animation(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
+    ch_means = _channel_spatial_means(maps)
+    ch_axis = np.arange(n_c, dtype=np.float64)
     lo = vals.min().item()
     hi = vals.max().item()
+    if PLOT_CHANNEL_MEAN:
+        lo = min(lo, ch_means.min().item())
+        hi = max(hi, ch_means.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
     lo, hi = lo - pad, hi + pad
 
@@ -1303,6 +1458,13 @@ def scatter_vs_channel_animation(
             vmax=max(n_c - 1, 1),
             linewidths=0,
         )
+        _scatter_channel_mean_markers(
+            ax,
+            ch_axis,
+            ch_means[d].numpy(),
+            color="black",
+            label="channel mean" if PLOT_CHANNEL_MEAN else None,
+        )
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
         ax.set_xlim(-0.5, n_c - 0.5)
         ax.set_ylim(lo, hi)
@@ -1310,6 +1472,8 @@ def scatter_vs_channel_animation(
         ax.set_ylabel(ylabel)
         ax.set_title(f"{title}\nd={d}  ({idx.numel()} features)")
         ax.grid(alpha=0.3)
+        if PLOT_CHANNEL_MEAN:
+            ax.legend(fontsize=7, markerscale=1.5, loc="best")
         fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
         plt.close(fig)
 
@@ -1342,8 +1506,13 @@ def scatter_io_animation(
     tracked_in = flat_in[:, idx]
     tracked_out = flat_out[:, idx]
     channels = (idx // spatial).numpy()
+    mean_in = _channel_spatial_means(inputs)
+    mean_out = _channel_spatial_means(outputs)
     lo = min(tracked_in.min().item(), tracked_out.min().item())
     hi = max(tracked_in.max().item(), tracked_out.max().item())
+    if PLOT_CHANNEL_MEAN:
+        lo = min(lo, mean_in.min().item(), mean_out.min().item())
+        hi = max(hi, mean_in.max().item(), mean_out.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
     lo, hi = lo - pad, hi + pad
 
@@ -1365,6 +1534,13 @@ def scatter_io_animation(
             vmax=max(n_c - 1, 1),
             linewidths=0,
         )
+        _scatter_channel_mean_markers(
+            ax,
+            mean_in[d].numpy(),
+            mean_out[d].numpy(),
+            color="black",
+            label="channel mean" if PLOT_CHANNEL_MEAN else None,
+        )
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
@@ -1373,6 +1549,8 @@ def scatter_io_animation(
         ax.set_title(f"{title}\nd={d}  ({idx.numel()} features, colour=channel)")
         ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.3)
+        if PLOT_CHANNEL_MEAN:
+            ax.legend(fontsize=7, markerscale=1.5, loc="best")
         fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
         plt.close(fig)
 
@@ -1473,25 +1651,41 @@ def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dic
     return out
 
 
-def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) -> dict:
+def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     name = spec["name"]
     run_dir = OUT_DIR / name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n=== {name} ===")
     save_inputs(spec, dataset, class_names, run_dir)
 
-    D = spec["D"]
-    step = spec.get("euler_step")
-    if step is None:
-        step = model.stage3_length / D
     method = spec.get("method")
-    print(f"D={D} euler_step={step:.4g} method={method or 'RK1'} batch={spec['batch_size']} n={len(spec['image_indices'])}")
+    if BACKBONE == "shared":
+        D = int(spec["D"])
+        step = spec.get("euler_step")
+        if step is None:
+            step = model.stage3_length / D
+        field_blocks = [model.deltifiedStage3[0]] * D
+        blocks: list[int] | None = None
+        overlay_label = f"D={D}"
+        print(
+            f"shared D={D} euler_step={step:.4g} method={method or 'RK1'} "
+            f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
+        )
+    else:
+        blocks = resolve_blocks(spec, model.depths[2])
+        step = float(spec["euler_step"])
+        field_blocks = [model.stage3[i] for i in blocks]
+        D = len(blocks)
+        overlay_label = name
+        print(
+            f"interpoled schedule={blocks} (D={D}) euler_step={step:.4g} "
+            f"method={method or 'RK1'} batch={spec['batch_size']} n={len(spec['image_indices'])}"
+        )
 
     res = trajectory_stats(
         model,
-        shared_block,
+        field_blocks,
         spec["image_indices"],
-        D=D,
         euler_step=step,
         method=method,
         batch_size=spec["batch_size"],
@@ -1499,6 +1693,8 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     )
     res["name"] = name
     res["spec"] = spec
+    res["blocks"] = blocks
+    res["overlay_label"] = overlay_label
 
     ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
     if ignored:
@@ -1551,6 +1747,8 @@ def run_one(model, shared_block, dataset, class_names: list[str], spec: dict) ->
     light = {
         "name": res["name"],
         "D": res["D"],
+        "blocks": blocks,
+        "overlay_label": overlay_label,
         "euler_step": res["euler_step"],
         "mean_x": res["mean_x"],
         "mean_h": res["mean_h"],
@@ -1580,7 +1778,7 @@ def main() -> None:
         KEEP_FRAMES = True
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"device={device}  out={OUT_DIR}  checkpoint={CHECKPOINT}")
+    print(f"device={device}  backbone={BACKBONE}  out={OUT_DIR}  checkpoint={CHECKPOINT}")
 
     dataset = ImageNetDataset(split=SPLIT, transforms=build_val_transforms())
     labels: list[int] = dataset.ds.data.column("label").to_pylist()
@@ -1599,7 +1797,16 @@ def main() -> None:
     for spec in runs:
         cid = spec["class_id"]
         who = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked"
-        print(f"  {spec['name']}: {who}, n={len(spec['image_indices'])}, bs={spec['batch_size']}, fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}")
+        if BACKBONE == "shared":
+            sched = f"D={spec['D']}"
+        elif "repeats" in spec:
+            sched = f"repeats={spec['repeats']} ES={spec['euler_step']:g}"
+        else:
+            sched = f"blocks={spec['blocks']} ES={spec['euler_step']:g}"
+        print(
+            f"  {spec['name']}: {who}, {sched}, n={len(spec['image_indices'])}, "
+            f"bs={spec['batch_size']}, fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}"
+        )
 
     if args.list_only:
         return
@@ -1607,9 +1814,11 @@ def main() -> None:
     if not CHECKPOINT.is_file():
         raise SystemExit(f"checkpoint not found: {CHECKPOINT}")
 
-    model = load_shared_convnext(CHECKPOINT).to(device).eval()
-    shared_block = model.deltifiedStage3[0]
-    assert shared_block.eulerStep == 1.0
+    if BACKBONE == "shared":
+        model = load_shared_convnext(CHECKPOINT).to(device).eval()
+        assert model.deltifiedStage3[0].eulerStep == 1.0
+    else:
+        model = load_interpoled_convnext(CHECKPOINT).to(device).eval()
 
     completed: list[dict] = []
     for spec in runs:
@@ -1617,7 +1826,7 @@ def main() -> None:
         if args.skip_existing and marker.is_file():
             print(f"skip existing {spec['name']}")
             continue
-        completed.append(run_one(model, shared_block, dataset, class_names, spec))
+        completed.append(run_one(model, dataset, class_names, spec))
 
     if SCATTER_OVERLAY_BY_D and completed:
         by_key: dict[tuple, list[dict]] = {}
@@ -1627,9 +1836,11 @@ def main() -> None:
         for group in by_key.values():
             if len(group) < 2:
                 continue
-            group = sorted(group, key=lambda r: r["D"])
-            ds = "-".join(str(r["D"]) for r in group)
-            out = OUT_DIR / f"scatter_h_overlay_D{ds}.png"
+            group = sorted(group, key=lambda r: (r["D"], r["name"]))
+            tag = "-".join(r.get("overlay_label", str(r["D"])) for r in group)
+            # Keep filename short / filesystem-safe.
+            tag = tag.replace(" ", "_").replace("/", "div")[:120]
+            out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
             scatter_overlay_by_d(group, path=out, channel=SCATTER_CHANNEL)
             print(f"overlay scatter -> {out}")
 
