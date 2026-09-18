@@ -51,7 +51,7 @@ EXPERIMENTS = [
     {"name": "B6_ES16", "blocks": [6], "euler_step": 16},
     {"name": "B6_ES20", "blocks": [6], "euler_step": 20},
 ]
-[
+EXPERIMENTS = [
     # Single residual, one giant Euler step (integrate the whole stage-3 interval).
     {"name": "B0_ES9", "blocks": [0], "euler_step": 9},
     {"name": "B1_ES9", "blocks": [1], "euler_step": 9},
