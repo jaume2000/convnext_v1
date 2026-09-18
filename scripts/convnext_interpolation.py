@@ -9,6 +9,7 @@ always runs once. Edit EXPERIMENTS and run:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,10 +26,86 @@ from utils.env import load_dotenv
 
 load_dotenv()
 
-CHECKPOINT = _REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"
-OUTPUT_PATH = _REPO_ROOT / "outputs" / "convnext_interpolation_droppath0"
+CHECKPOINT = Path(
+    os.environ.get(
+        "CONVNEXT_CHECKPOINT",
+        str(_REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"),
+    )
+)
+OUTPUT_PATH = Path(
+    os.environ.get(
+        "CONVNEXT_INTERP_OUT",
+        str(_REPO_ROOT / "outputs" / "convnext_interpolation_droppath0"),
+    )
+)
 BATCH_SIZE = 128
 
+# Previous Euler / block-schedule sweeps (kept for reference; not run).
+OLD_EXPERIMENTS = [
+    # Single residual, one giant Euler step (integrate the whole stage-3 interval).
+    {"name": "B0_ES9", "blocks": [0], "euler_step": 9},
+    {"name": "B1_ES9", "blocks": [1], "euler_step": 9},
+    {"name": "B2_ES9", "blocks": [2], "euler_step": 9},
+    {"name": "B3_ES9", "blocks": [3], "euler_step": 9},
+    {"name": "B4_ES9", "blocks": [4], "euler_step": 9},
+    {"name": "B5_ES9", "blocks": [5], "euler_step": 9},
+    {"name": "B6_ES9", "blocks": [6], "euler_step": 9},
+    {"name": "B7_ES9", "blocks": [7], "euler_step": 9},
+    {"name": "B8_ES9", "blocks": [8], "euler_step": 9},
+    # Single residual, unit step.
+    {"name": "B0_ES1", "blocks": [0], "euler_step": 1},
+    {"name": "B1_ES1", "blocks": [1], "euler_step": 1},
+    {"name": "B2_ES1", "blocks": [2], "euler_step": 1},
+    {"name": "B3_ES1", "blocks": [3], "euler_step": 1},
+    {"name": "B4_ES1", "blocks": [4], "euler_step": 1},
+    {"name": "B5_ES1", "blocks": [5], "euler_step": 1},
+    {"name": "B6_ES1", "blocks": [6], "euler_step": 1},
+    {"name": "B7_ES1", "blocks": [7], "euler_step": 1},
+    {"name": "B8_ES1", "blocks": [8], "euler_step": 1},
+
+
+    # Two residuals, half the original depth each.
+    {"name": "B0-8_ES4.5", "blocks": [0, 8], "euler_step": 9 / 2},
+    {"name": "B1-7_ES4.5", "blocks": [1, 7], "euler_step": 9 / 2},
+    {"name": "B2-6_ES4.5", "blocks": [2, 6], "euler_step": 9 / 2},
+    {"name": "B3-5_ES4.5", "blocks": [3, 5], "euler_step": 9 / 2},
+    {"name": "B4-4_ES4.5", "blocks": [4, 4], "euler_step": 9 / 2},
+    {"name": "B5-3_ES4.5", "blocks": [5, 3], "euler_step": 9 / 2},
+    {"name": "B6-2_ES4.5", "blocks": [6, 2], "euler_step": 9 / 2},
+    {"name": "B7-1_ES4.5", "blocks": [7, 1], "euler_step": 9 / 2},
+    {"name": "B8-0_ES4.5", "blocks": [8, 0], "euler_step": 9 / 2},
+    # Two residuals, ES= 1
+    {"name": "B0-8_ES1", "blocks": [0, 8], "euler_step": 1},
+    {"name": "B1-7_ES1", "blocks": [1, 7], "euler_step": 1},
+    {"name": "B2-6_ES1", "blocks": [2, 6], "euler_step": 1},
+    {"name": "B3-5_ES1", "blocks": [3, 5], "euler_step": 1},
+    {"name": "B4-4_ES1", "blocks": [4, 4], "euler_step": 1},
+    {"name": "B5-3_ES1", "blocks": [5, 3], "euler_step": 1},
+    {"name": "B6-2_ES1", "blocks": [6, 2], "euler_step": 1},
+    {"name": "B7-1_ES1", "blocks": [7, 1], "euler_step": 1},
+    {"name": "B8-0_ES1", "blocks": [8, 0], "euler_step": 1},
+    # Ends + middle, varying step.
+    {"name": "B0-4-8_ES4.5", "blocks": [0, 4, 8], "euler_step": 9 / 2},
+    {"name": "B0-4-8_ES3", "blocks": [0, 4, 8], "euler_step": 9 / 3},
+    {"name": "B0-4-8_ES2.25", "blocks": [0, 4, 8], "euler_step": 9 / 4},
+    # Length-9 schedules at unit step.
+    {"name": "B0-4-8x3_ES1", "blocks": [0, 4, 8, 0, 4, 8, 0, 4, 8], "euler_step": 1},
+    {"name": "B0x2-2x2-4x2-6x2-8_ES1", "blocks": [0, 0, 2, 2, 4, 4, 6, 6, 8], "euler_step": 1},
+    {"name": "B0x3-3x3-6x3_ES1", "blocks": [0, 0, 0, 3, 3, 3, 6, 6, 6], "euler_step": 1},
+    {"name": "B0x4-4-8x4_ES1", "blocks": [0, 0, 0, 0, 4, 8, 8, 8, 8], "euler_step": 1},
+    # All 9 residuals, refined Euler grid.
+    {"name": "R2_ES0.5", "repeats": 2, "euler_step": 0.5},
+    {"name": "R4_ES0.25", "repeats": 4, "euler_step": 0.25},
+    {"name": "R10_ES0.1", "repeats": 10, "euler_step": 0.1},
+    {"name": "R100_ES0.01", "repeats": 100, "euler_step": 0.01},
+    # All 9 residuals, unit step.
+    {"name": "R2_ES1", "repeats": 2, "euler_step": 1},
+    {"name": "R4_ES1", "repeats": 4, "euler_step": 1},
+    {"name": "R10_ES1", "repeats": 10, "euler_step": 1},
+    {"name": "R100_ES1", "repeats": 100, "euler_step": 1},
+]
+
+# Active RK grid (what __main__ runs).
 REPEATS = [1, 2, 4, 8, 16, 32, 64, 128]
 METHODS = ["RK1", "RK2", "RK4"]
 EXPERIMENTS = [
@@ -40,6 +117,15 @@ EXPERIMENTS = [
     }
     for r in REPEATS
     for m in METHODS
+]
+# Extra: R10 ES=0.1 with all RKs; R10/R100 ES=1 Euler-only (no RK sweep).
+EXPERIMENTS += [
+    {"name": f"R10_ES0.1_{m}", "repeats": 10, "euler_step": 0.1, "method": m}
+    for m in METHODS
+]
+EXPERIMENTS += [
+    {"name": "R10_ES1_RK1", "repeats": 10, "euler_step": 1, "method": "RK1"},
+    {"name": "R100_ES1_RK1", "repeats": 100, "euler_step": 1, "method": "RK1"},
 ]
 
 

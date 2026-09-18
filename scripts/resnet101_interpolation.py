@@ -31,6 +31,48 @@ BATCH_SIZE = 128
 # Identity residuals in stage 3 (layer3[1..22]).
 N_BLOCKS = 22
 
+# Previous Euler / block-schedule sweeps (kept for reference; not run).
+OLD_EXPERIMENTS = [
+    # Baseline (native depth, unit step).
+    {"name": "BASELINE", "repeats": 1, "euler_step": 1},
+    # Single residual, one giant Euler step (whole stage-3 interval).
+    {"name": "B0_ES22", "blocks": [0], "euler_step": 22},
+    {"name": "B11_ES22", "blocks": [11], "euler_step": 22},
+    {"name": "B21_ES22", "blocks": [21], "euler_step": 22},
+    # Single residual, unit step.
+    {"name": "B0_ES1", "blocks": [0], "euler_step": 1},
+    {"name": "B11_ES1", "blocks": [11], "euler_step": 1},
+    {"name": "B21_ES1", "blocks": [21], "euler_step": 1},
+    # Two residuals, half depth each.
+    {"name": "B0-21_ES11", "blocks": [0, 21], "euler_step": 22 / 2},
+    {"name": "B5-16_ES11", "blocks": [5, 16], "euler_step": 22 / 2},
+    {"name": "B11-11_ES11", "blocks": [11, 11], "euler_step": 22 / 2},
+    {"name": "B16-5_ES11", "blocks": [16, 5], "euler_step": 22 / 2},
+    {"name": "B21-0_ES11", "blocks": [21, 0], "euler_step": 22 / 2},
+    # Two residuals, ES=1.
+    {"name": "B0-21_ES1", "blocks": [0, 21], "euler_step": 1},
+    {"name": "B5-16_ES1", "blocks": [5, 16], "euler_step": 1},
+    {"name": "B11-11_ES1", "blocks": [11, 11], "euler_step": 1},
+    {"name": "B16-5_ES1", "blocks": [16, 5], "euler_step": 1},
+    {"name": "B21-0_ES1", "blocks": [21, 0], "euler_step": 1},
+    # Ends + middle, varying step.
+    {"name": "B0-11-21_ES11", "blocks": [0, 11, 21], "euler_step": 22 / 2},
+    {"name": "B0-11-21_ES22div3", "blocks": [0, 11, 21], "euler_step": 22 / 3},
+    {"name": "B0-11-21_ES5.5", "blocks": [0, 11, 21], "euler_step": 22 / 4},
+    # Length-ish schedules at unit step.
+    {"name": "B0-11-21x_ES1", "blocks": [0, 11, 21, 0, 11, 21], "euler_step": 1},
+    {"name": "B0x3-11x3-21x3_ES1", "blocks": [0, 0, 0, 11, 11, 11, 21, 21, 21], "euler_step": 1},
+    # All 22 residuals, refined Euler grid.
+    {"name": "R2_ES0.5", "repeats": 2, "euler_step": 0.5},
+    {"name": "R4_ES0.25", "repeats": 4, "euler_step": 0.25},
+    {"name": "R10_ES0.1", "repeats": 10, "euler_step": 0.1},
+    # All 22 residuals, unit step.
+    {"name": "R2_ES1", "repeats": 2, "euler_step": 1},
+    {"name": "R4_ES1", "repeats": 4, "euler_step": 1},
+    {"name": "R10_ES1", "repeats": 10, "euler_step": 1},
+]
+
+# Active RK grid (what __main__ runs).
 REPEATS = [1, 2, 4, 8, 16, 32, 64, 128]
 METHODS = ["RK1", "RK2", "RK4"]
 EXPERIMENTS = [
@@ -42,6 +84,15 @@ EXPERIMENTS = [
     }
     for r in REPEATS
     for m in METHODS
+]
+# Extra: R10 ES=0.1 with all RKs; R10/R100 ES=1 Euler-only (no RK sweep).
+EXPERIMENTS += [
+    {"name": f"resnet101_R10_ES0.1_{m}", "repeats": 10, "euler_step": 0.1, "method": m}
+    for m in METHODS
+]
+EXPERIMENTS += [
+    {"name": "resnet101_R10_ES1_RK1", "repeats": 10, "euler_step": 1, "method": "RK1"},
+    {"name": "resnet101_R100_ES1_RK1", "repeats": 100, "euler_step": 1, "method": "RK1"},
 ]
 
 

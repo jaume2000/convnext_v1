@@ -94,11 +94,13 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
 fi
 
 SHARED_CKPT="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-INTERPOLED_CKPT="${PROJECT_ROOT}/outputs/convnextv1_imagenet_droppath0/weights/last.pth"
-if [[ ! -f "${SHARED_CKPT}" && ! -f "${INTERPOLED_CKPT}" ]]; then
+INTERPOLED_CKPT="${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth"
+INTERPOLED_CKPT_DP0="${PROJECT_ROOT}/outputs/convnextv1_imagenet_droppath0/weights/last.pth"
+if [[ ! -f "${SHARED_CKPT}" && ! -f "${INTERPOLED_CKPT}" && ! -f "${INTERPOLED_CKPT_DP0}" ]]; then
   echo "No feature-map checkpoint found (expected shared and/or interpoled)." >&2
-  echo "  shared:     ${SHARED_CKPT}" >&2
-  echo "  interpoled: ${INTERPOLED_CKPT}" >&2
+  echo "  shared:            ${SHARED_CKPT}" >&2
+  echo "  interpoled:        ${INTERPOLED_CKPT}" >&2
+  echo "  interpoled dp0:    ${INTERPOLED_CKPT_DP0}" >&2
   exit 1
 fi
 
@@ -111,6 +113,7 @@ echo "HF cache: ${HF_DATASETS_CACHE}"
 echo "TORCH_HOME: ${TORCH_HOME}"
 echo "Shared ckpt: ${SHARED_CKPT} ($([ -f "${SHARED_CKPT}" ] && echo ok || echo missing))"
 echo "Interpoled ckpt: ${INTERPOLED_CKPT} ($([ -f "${INTERPOLED_CKPT}" ] && echo ok || echo missing))"
+echo "Interpoled dp0: ${INTERPOLED_CKPT_DP0} ($([ -f "${INTERPOLED_CKPT_DP0}" ] && echo ok || echo missing))"
 echo "Script: ${SCRIPT}"
 echo "Args: ${TRAIN_ARGS:-}"
 echo "ffmpeg: $(command -v ffmpeg || echo missing)"

@@ -8,8 +8,10 @@ Interpoled mode (``BACKBONE = "interpoled"``): walks a stage-3 ``blocks`` /
 (set via ``INTERPOLED_MODELS`` / per-run ``model``). Swin NHWC is wrapped to NCHW
 for the same analysis/plots as ConvNeXt/ResNet.
 
-Submit:
+Submit (interpoled, ``BACKBONE = "interpoled"``):
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
+
+Shared ConvNeXt maps: set ``BACKBONE = "shared"`` then submit the same job again.
 
 Or locally:
   python scripts/feature_map_explorer.py
@@ -57,13 +59,21 @@ from utils.env import load_dotenv
 # "interpoled" = distinct stage-3 blocks on convnext / resnet50 / resnet101 / swin
 BACKBONE = "interpoled"  # "shared" | "interpoled"
 
-# Which interpoled networks to sweep. Kept for docs / filtering; runs are listed
-# explicitly below (4 experiments × each model).
-INTERPOLED_MODELS = ["convnext", "resnet50", "resnet101", "swin"]
+# Interpoled networks for feature-map sweeps.
+INTERPOLED_MODELS = [
+    "convnext",           # outputs/convnextv1_imagenet (with drop-path)
+    "convnext_droppath0", # outputs/convnextv1_imagenet_droppath0
+    "resnet50",
+    "resnet101",
+    "swin",
+]
 
 SHARED_CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
 INTERPOLED_CONVNEXT_CHECKPOINT = (
     _REPO_ROOT / "outputs" / "convnextv1_imagenet" / "weights" / "last.pth"
+)
+INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT = (
+    _REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"
 )
 OUT_DIR_SHARED = _REPO_ROOT / "outputs" / "featureMaps"
 OUT_DIR_INTERPOLED = _REPO_ROOT / "outputs" / "featureMaps_interpoled"
@@ -75,50 +85,47 @@ MAX_IMAGES_PER_CLASS: int | None = 100
 BATCH_SIZE = 8
 FPS = 10.0
 
-# Shared-backbone runs (D + optional euler_step / method).
+# Shared ConvNeXt: baseline D=9 + R100 at ES=0.01 / 0.1, ± ignore top-1 channel.
+_FM_COMMON = {"class_id": 289, "max_images": 1, "batch_size": 1, "method": None}
 RUNS_SHARED: list[dict] = [
-    {"name": "D100_rk1_c7_n50_bs16_no_ignore", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 0},
-    {"name": "D100_rk1_c7_n50_bs16", "D": 100, "method": None, "class_id": 7, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c7_n1_bs1", "D": 100, "method": None, "class_id": 7, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c207_n50_bs16", "D": 100, "method": None, "class_id": 207, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c207_n1_bs1", "D": 100, "method": None, "class_id": 207, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c282_n50_bs16", "D": 100, "method": None, "class_id": 282, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c282_n1_bs1", "D": 100, "method": None, "class_id": 282, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c289_n50_bs16", "D": 100, "method": None, "class_id": 289, "max_images": 50, "batch_size": 4, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D100_rk1_c289_n1_bs1", "D": 100, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 10, "ignore_top_k_channels": 1},
-    {"name": "D50_rk1_c289_n1_bs1", "D": 50, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 5, "ignore_top_k_channels": 1},
-    {"name": "D25_rk1_c289_n1_bs1", "D": 25, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 3, "ignore_top_k_channels": 1},
-    {"name": "D9_rk1_c289_n1_bs1", "D": 9, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 1},
-    {"name": "D8_rk1_c289_n1_bs1", "D": 8, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 1},
-    {"name": "D5_rk1_c289_n1_bs1", "D": 5, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
-    {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
+    {"name": "shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, **_FM_COMMON},
+    {"name": "shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, **_FM_COMMON},
+    {"name": "shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, **_FM_COMMON},
+    {"name": "shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, **_FM_COMMON},
+    {"name": "shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, **_FM_COMMON},
+    {"name": "shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, **_FM_COMMON},
 ]
 
-# 4 experiments × 4 models (convnext, resnet50, resnet101, swin).
+# Interpoled: same 6 schedules × each model (baseline ± ignore, R100 ES=0.01/0.1 ± ignore).
+_FM_INTERP_SPECS: list[tuple[str, dict]] = [
+    ("baseline_R1_ES1_c289_n1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0}),
+    ("baseline_R1_ES1_c289_n1_ignore1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1}),
+    ("R100_ES0.01_c289_n1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES0.01_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1}),
+    ("R100_ES0.1_c289_n1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES0.1_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1}),
+]
 INTERPOLED_EXPERIMENTS: list[dict] = [
-    # --- convnext ---
-    {"model": "convnext", "name": "convnext_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    {"model": "convnext", "name": "convnext_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
-    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
-    # --- resnet50 ---
-    {"model": "resnet50", "name": "resnet50_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    {"model": "resnet50", "name": "resnet50_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
-    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
-    # --- resnet101 ---
-    {"model": "resnet101", "name": "resnet101_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    {"model": "resnet101", "name": "resnet101_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
-    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
-    # --- swin ---
-    {"model": "swin", "name": "swin_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    {"model": "swin", "name": "swin_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 0},
-    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 80, "ignore_top_k_channels": 1},
+    {
+        "model": model,
+        "name": f"{model}_{suffix}",
+        "class_id": 289,
+        "max_images": 1,
+        "batch_size": 1,
+        **kw,
+    }
+    for model in INTERPOLED_MODELS
+    for suffix, kw in _FM_INTERP_SPECS
 ]
 
-INTERPOLED_MODEL_KEYS = ("convnext", "resnet50", "resnet101", "swin")
+INTERPOLED_MODEL_KEYS = (
+    "convnext",
+    "convnext_droppath0",
+    "resnet50",
+    "resnet101",
+    "swin",
+)
+_CONVNEXT_KEYS = ("convnext", "convnext_droppath0")
 
 
 def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
@@ -281,6 +288,12 @@ def load_interpoled_model(model_key: str) -> nn.Module:
         if not INTERPOLED_CONVNEXT_CHECKPOINT.is_file():
             raise FileNotFoundError(f"ConvNeXt checkpoint not found: {INTERPOLED_CONVNEXT_CHECKPOINT}")
         return load_interpoled_convnext(INTERPOLED_CONVNEXT_CHECKPOINT)
+    if model_key == "convnext_droppath0":
+        if not INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT.is_file():
+            raise FileNotFoundError(
+                f"ConvNeXt droppath0 checkpoint not found: {INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT}"
+            )
+        return load_interpoled_convnext(INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT)
     if model_key == "resnet50":
         model = InterpoledResNet50(weights="DEFAULT")
         print(f"Loaded torchvision ResNet-50 DEFAULT, n_blocks={model.n_blocks}")
@@ -309,7 +322,7 @@ class _NHWCBlockAsNCHW(nn.Module):
 
 
 def stage3_n_blocks(model_key: str, model: nn.Module) -> int:
-    if model_key == "convnext":
+    if model_key in _CONVNEXT_KEYS:
         return int(model.depths[2])
     if model_key in ("resnet50", "resnet101"):
         return int(model.n_blocks)
@@ -320,7 +333,7 @@ def stage3_n_blocks(model_key: str, model: nn.Module) -> int:
 
 def enter_stage3(model_key: str, model: nn.Module, batch: torch.Tensor) -> torch.Tensor:
     """Map images → stage-3 feature state in NCHW."""
-    if model_key == "convnext":
+    if model_key in _CONVNEXT_KEYS:
         return model.stage2(model.stage1(model.stem(batch)))
     if model_key in ("resnet50", "resnet101"):
         b = model.backbone
@@ -342,7 +355,7 @@ def enter_stage3(model_key: str, model: nn.Module, batch: torch.Tensor) -> torch
 
 def stage3_field_blocks(model_key: str, model: nn.Module, blocks: list[int]) -> list[nn.Module]:
     """Modules whose forward is residual ``x + f(x)``; used as ``h = block(x) - x``."""
-    if model_key == "convnext":
+    if model_key in _CONVNEXT_KEYS:
         return [model.stage3[i] for i in blocks]
     if model_key in ("resnet50", "resnet101"):
         return [model.backbone.layer3[i + 1] for i in blocks]
@@ -1917,6 +1930,7 @@ def main() -> None:
     if BACKBONE == "interpoled":
         print(f"interpoled models={INTERPOLED_MODELS}")
         print(f"convnext ckpt={INTERPOLED_CONVNEXT_CHECKPOINT}")
+        print(f"convnext_droppath0 ckpt={INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT}")
 
     dataset = ImageNetDataset(split=SPLIT, transforms=build_val_transforms())
     labels: list[int] = dataset.ds.data.column("label").to_pylist()
