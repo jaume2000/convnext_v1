@@ -57,7 +57,8 @@ from utils.env import load_dotenv
 # "interpoled" = distinct stage-3 blocks on convnext / resnet50 / resnet101 / swin
 BACKBONE = "interpoled"  # "shared" | "interpoled"
 
-# Which interpoled networks to sweep (each INTERPOLED_EXPERIMENT is cloned per model).
+# Which interpoled networks to sweep. Kept for docs / filtering; runs are listed
+# explicitly below (4 experiments × each model).
 INTERPOLED_MODELS = ["convnext", "resnet50", "resnet101", "swin"]
 
 SHARED_CHECKPOINT = _REPO_ROOT / "outputs" / "shared_convnextv1_imagenet" / "weights" / "last.pth"
@@ -93,28 +94,46 @@ RUNS_SHARED: list[dict] = [
     {"name": "D3_rk1_c289_n1_bs1", "D": 3, "method": None, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 0.5, "ignore_top_k_channels": 1},
 ]
 
-# Shared across INTERPOLED_MODELS (``model`` / run ``name`` filled in below).
+# 4 experiments × 4 models (convnext, resnet50, resnet101, swin).
+_IE = dict(class_id=289, max_images=1, batch_size=1, fps=2)
 INTERPOLED_EXPERIMENTS: list[dict] = [
-    {"name": "baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 1, "ignore_top_k_channels": 0},
-    {"name": "R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"name": "R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 0},
-    {"name": "R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "class_id": 289, "max_images": 1, "batch_size": 1, "fps": 2, "ignore_top_k_channels": 1},
+    # --- convnext ---
+    {"model": "convnext", "name": "convnext_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
+    {"model": "convnext", "name": "convnext_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
+    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
+    {"model": "convnext", "name": "convnext_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    # --- resnet50 ---
+    {"model": "resnet50", "name": "resnet50_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
+    {"model": "resnet50", "name": "resnet50_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
+    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
+    {"model": "resnet50", "name": "resnet50_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    # --- resnet101 ---
+    {"model": "resnet101", "name": "resnet101_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
+    {"model": "resnet101", "name": "resnet101_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
+    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
+    {"model": "resnet101", "name": "resnet101_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
+    # --- swin ---
+    {"model": "swin", "name": "swin_baseline_R1_ES1_c289_n1", "repeats": 1, "euler_step": 1, "fps": 1, "ignore_top_k_channels": 0, **{k: v for k, v in _IE.items() if k != "fps"}},
+    {"model": "swin", "name": "swin_R2_ES0.5_c289_n1", "repeats": 2, "euler_step": 0.5, "ignore_top_k_channels": 0, **_IE},
+    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1_noignore", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 0, **_IE},
+    {"model": "swin", "name": "swin_R100_ES0.01_c289_n1", "repeats": 100, "euler_step": 0.01, "ignore_top_k_channels": 1, **_IE},
 ]
 
 INTERPOLED_MODEL_KEYS = ("convnext", "resnet50", "resnet101", "swin")
 
 
-def build_interpoled_runs(models: list[str], experiments: list[dict]) -> list[dict]:
+def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
+    """Normalize interpoled runs that already carry a ``model`` field."""
     runs: list[dict] = []
-    for model in models:
+    for exp in experiments:
+        model = exp.get("model")
         if model not in INTERPOLED_MODEL_KEYS:
             raise ValueError(f"Unknown interpoled model {model!r}; expected one of {INTERPOLED_MODEL_KEYS}")
-        for exp in experiments:
-            run = dict(exp)
-            run["model"] = model
-            base = exp.get("name") or "run"
-            run["name"] = base if base.startswith(f"{model}_") else f"{model}_{base}"
-            runs.append(run)
+        run = dict(exp)
+        base = run.get("name") or "run"
+        if not base.startswith(f"{model}_"):
+            run["name"] = f"{model}_{base}"
+        runs.append(run)
     return runs
 
 
@@ -123,7 +142,7 @@ if BACKBONE == "shared":
     RUNS = RUNS_SHARED
 elif BACKBONE == "interpoled":
     OUT_DIR = OUT_DIR_INTERPOLED
-    RUNS = build_interpoled_runs(INTERPOLED_MODELS, INTERPOLED_EXPERIMENTS)
+    RUNS = build_interpoled_runs(INTERPOLED_EXPERIMENTS)
 else:
     raise ValueError(f"Unknown BACKBONE={BACKBONE!r}; use 'shared' or 'interpoled'")
 
