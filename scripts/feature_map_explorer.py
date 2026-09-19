@@ -182,7 +182,21 @@ CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
 # Default when a RUNS entry omits ignore_top_k_channels. 0 disables.
 IGNORE_TOP_K_CHANNELS = 1
-VIDEO_MAPS = ["h", "x", "cos_h", "norm_h", "l2_h", "h_CH", "x_CH", "scatter_ch_x", "scatter_ch_h", "scatter_h"]
+VIDEO_MAPS = [
+    "h",
+    "x",
+    "cos_h",
+    "norm_h",
+    "l2_h",
+    "h_CH",
+    "x_CH",
+    "scatter_ch_x",
+    "scatter_ch_h",
+    "scatter_h",
+    "scatter_ch_x_means",
+    "scatter_ch_h_means",
+    "scatter_h_means",
+]
 
 CMAP_X = "viridis"
 CMAP_H = "RdBu_r"
@@ -194,8 +208,6 @@ GRID_MAX_FRAMES = 36
 SCATTER_MAX_POINTS = 99999999
 # None = all channels in static scatter; int = that channel only.
 SCATTER_CHANNEL: int | None = None
-# Overlay per-channel spatial means as X markers on top of scatter clouds.
-PLOT_CHANNEL_MEAN = True
 # After all RUNS, write a combined residual scatter coloured/legended by D.
 SCATTER_OVERLAY_BY_D = True
 # Animation: sample N features once, track the same indices across depth.
@@ -234,6 +246,9 @@ KIND_TITLES = {
     "scatter_ch_x": "state vs channel: C → x_d",
     "scatter_ch_h": "field vs channel: C → h_d (= Δx_d / ES)",
     "scatter_h": "residual field: x_d → h_d (= Δx_d / ES)",
+    "scatter_ch_x_means": "channel means: C → mean(x_d)",
+    "scatter_ch_h_means": "channel means: C → mean(h_d)",
+    "scatter_h_means": "channel means: mean(x_d) → mean(h_d)",
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -430,7 +445,14 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
     if matrix.numel() == 0 or min(matrix.shape) == 0:
         return float("nan")
     # float32 SVD is enough for a scalar PR; keep matrix on CPU.
-    _, s, _ = torch.linalg.svd(matrix.float().cpu(), full_matrices=False)
+    m = matrix.float().cpu()
+    # Divergent ODE steps (large ES) can produce Inf/NaN; SVD refuses those.
+    if not torch.isfinite(m).all():
+        return float("nan")
+    try:
+        _, s, _ = torch.linalg.svd(m, full_matrices=False)
+    except RuntimeError:
+        return float("nan")
     return participation_ratio(s)
 
 
@@ -571,6 +593,11 @@ def trajectory_stats(
         # SVD PR on H_i shaped (D, dim) using h_0..h_{D-1}, and mid-step (H*W, C).
         H_stack = torch.stack(H_rows[:D], dim=1)  # [B, D, dim]
         mid = D // 2
+        if not torch.isfinite(H_stack).all():
+            print(
+                f"  WARNING: non-finite residuals at batch start={start} "
+                f"(ES={es:g}, D={D}); PR will be NaN for those images"
+            )
         for bi in range(bsz):
             pr_depth_i[start + bi] = svd_participation_ratio(H_stack[bi])
             h_mid = H_rows[mid][bi].reshape(x.shape[1], -1).T  # (H*W, C)
@@ -826,22 +853,30 @@ def frame_heading(run_name: str, formula: str, depth: str) -> str:
 
 
 def draw_style(maps: torch.Tensor, kind: str) -> dict:
+    finite = maps[torch.isfinite(maps)]
+
+    def _finite_max(default: float = 1.0) -> float:
+        return float(finite.max().item()) if finite.numel() else default
+
+    def _finite_min(default: float = 0.0) -> float:
+        return float(finite.min().item()) if finite.numel() else default
+
     if kind.startswith("cos"):
         cmap = CMAP_COS
-        vmax = maps.max().item() if SHARED_SCALE else None
+        vmax = _finite_max() if SHARED_SCALE else None
         return {"cmap": cmap, "vmin": 0.0, **({"vmax": vmax} if vmax is not None else {})}
     if kind in ("norm_h", "l2_h"):
         cmap = CMAP_NORM
-        vmax = maps.max().item() if SHARED_SCALE else None
+        vmax = _finite_max() if SHARED_SCALE else None
         return {"cmap": cmap, "vmin": 0.0, **({"vmax": vmax} if vmax is not None else {})}
     signed = kind in ("h", "h_CH")
     cmap = CMAP_H if signed else CMAP_X
     if not SHARED_SCALE:
         return {"cmap": cmap}
     if signed:
-        limit = maps.abs().max().item()
+        limit = float(finite.abs().max().item()) if finite.numel() else 1.0
         return {"cmap": cmap, "vmin": -limit, "vmax": limit}
-    return {"cmap": cmap, "vmin": maps.min().item(), "vmax": maps.max().item()}
+    return {"cmap": cmap, "vmin": _finite_min(), "vmax": _finite_max()}
 
 
 def ch_cut(maps: torch.Tensor) -> torch.Tensor:
@@ -1017,13 +1052,31 @@ def _load_rgb_frames(frame_dir: Path) -> list[Image.Image]:
     return padded
 
 
+# MPEG-4 Part 2 rejects frames with any side > 8191 (ResNet C×H at 8px/cell is 8236 wide).
+_MPEG4_MAX_SIDE = 8190
+
+
+def _even_fit_size(w: int, h: int, max_side: int = _MPEG4_MAX_SIDE) -> tuple[int, int]:
+    """Shrink (w, h) to fit in max_side×max_side, then force even sides for yuv420p/mpeg4."""
+    scale = min(1.0, max_side / max(w, 1), max_side / max(h, 1))
+    out_w = max(2, int(w * scale))
+    out_h = max(2, int(h * scale))
+    return out_w - (out_w % 2), out_h - (out_h % 2)
+
+
 def _write_mp4_ffmpeg(frame_dir: Path, mp4: Path, fps: float) -> bool:
     if not shutil.which("ffmpeg"):
         return False
     # Prefer libx264; fall back to mpeg4 when the build has no x264 (common on HPC images).
-    for codec_args in (
-        ["-c:v", "libx264", "-pix_fmt", "yuv420p"],
-        ["-c:v", "mpeg4", "-q:v", "5"],
+    # mpeg4 needs the side cap; libx264 only needs even dimensions.
+    even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    fit = (
+        f"scale='min(iw,{_MPEG4_MAX_SIDE})':'min(ih,{_MPEG4_MAX_SIDE})'"
+        f":force_original_aspect_ratio=decrease,{even}"
+    )
+    for codec_args, vf in (
+        (["-c:v", "libx264", "-pix_fmt", "yuv420p"], even),
+        (["-c:v", "mpeg4", "-q:v", "5"], fit),
     ):
         proc = subprocess.run(
             [
@@ -1031,7 +1084,7 @@ def _write_mp4_ffmpeg(frame_dir: Path, mp4: Path, fps: float) -> bool:
                 "-framerate", str(fps),
                 "-i", str(frame_dir / "frame_%04d.png"),
                 *codec_args,
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-vf", vf,
                 str(mp4),
             ],
             capture_output=True,
@@ -1054,9 +1107,8 @@ def _write_mp4_opencv(frame_dir: Path, mp4: Path, fps: float) -> bool:
     first = cv2.imread(str(frames[0]))
     if first is None:
         return False
-    h, w = first.shape[:2]
-    w -= w % 2
-    h -= h % 2
+    h0, w0 = first.shape[:2]
+    w, h = _even_fit_size(w0, h0)
     # mp4v is widely available; avc1/H264 often is not in OpenCV builds.
     writer = cv2.VideoWriter(str(mp4), cv2.VideoWriter_fourcc(*"mp4v"), max(fps, 1e-3), (w, h))
     if not writer.isOpened():
@@ -1169,7 +1221,6 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "PR_depth_on_mean_traj": res.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": res.get("PR_spatial_on_mean_traj"),
         "scatter_channel": SCATTER_CHANNEL,
-        "plot_channel_mean": PLOT_CHANNEL_MEAN,
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     if SAVE_TENSORS:
@@ -1286,33 +1337,6 @@ def _channel_spatial_means(maps: torch.Tensor) -> torch.Tensor:
     return maps.flatten(2).mean(-1)
 
 
-def _scatter_channel_mean_markers(
-    ax: plt.Axes,
-    xs,
-    ys,
-    *,
-    color=None,
-    cmap_color=None,
-    label: str | None = None,
-) -> None:
-    """Draw channel-mean markers on top of a scatter cloud."""
-    if not PLOT_CHANNEL_MEAN:
-        return
-    if color is None:
-        color = cmap_color if cmap_color is not None else "black"
-    ax.scatter(
-        xs,
-        ys,
-        marker="x",
-        s=48,
-        linewidths=1.4,
-        alpha=1.0,
-        zorder=6,
-        color=color,
-        label=label,
-    )
-
-
 def scatter_io(
     inputs: torch.Tensor,
     outputs: torch.Tensor,
@@ -1347,14 +1371,11 @@ def scatter_io(
     cmap = plt.cm.viridis
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
-    mean_in = _channel_spatial_means(inputs)
-    mean_out = _channel_spatial_means(outputs)
     lo = min(flat_in.min().item(), flat_out.min().item())
     hi = max(flat_in.max().item(), flat_out.max().item())
     if draw_y_equals_x:
         ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    mean_labeled = False
     for d in range(n):
         a = flat_in[d]
         b = flat_out[d]
@@ -1377,18 +1398,6 @@ def scatter_io(
             else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
             **c_kw,
         )
-        mean_label = None
-        if PLOT_CHANNEL_MEAN and not mean_labeled and label is None:
-            mean_label = "channel mean"
-            mean_labeled = True
-        _scatter_channel_mean_markers(
-            ax,
-            mean_in[d].numpy(),
-            mean_out[d].numpy(),
-            color=color,
-            cmap_color=None if color is not None else cmap(d / max(n - 1, 1)),
-            label=mean_label,
-        )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     if own_fig:
@@ -1397,6 +1406,81 @@ def scatter_io(
     ax.grid(alpha=0.3)
     if own_fig:
         ax.legend(fontsize=7, markerscale=2)
+        fig.savefig(path, dpi=140)
+        plt.close(fig)
+    return ax
+
+
+def scatter_io_means(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    xlabel: str,
+    ylabel: str,
+    channel: int | None = SCATTER_CHANNEL,
+    label: str | None = None,
+    ax: plt.Axes | None = None,
+    color=None,
+) -> plt.Axes:
+    """Scatter of per-channel spatial means only (colour = depth, or solid if ax shared)."""
+    assert inputs.shape == outputs.shape and inputs.ndim == 4
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+    else:
+        fig = ax.figure
+
+    n, n_c = inputs.shape[:2]
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"scatter channel {channel} outside 0..{n_c - 1}")
+        inputs = inputs[:, channel : channel + 1]
+        outputs = outputs[:, channel : channel + 1]
+        n_c = 1
+
+    mean_in = _channel_spatial_means(inputs)
+    mean_out = _channel_spatial_means(outputs)
+    cmap = plt.cm.viridis
+    ch_colors = np.arange(n_c, dtype=np.float64)
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for d in range(n):
+        c_kw = {}
+        if color is not None:
+            c_kw["color"] = color
+        else:
+            c_kw["c"] = ch_colors
+            c_kw["cmap"] = SCATTER_ANIM_CMAP
+            c_kw["vmin"] = 0
+            c_kw["vmax"] = max(n_c - 1, 1)
+        ax.scatter(
+            mean_in[d].numpy(),
+            mean_out[d].numpy(),
+            s=28,
+            alpha=0.85,
+            linewidths=0,
+            zorder=5,
+            label=(label if d == 0 else None)
+            if label is not None
+            else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
+            **c_kw,
+        )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if own_fig:
+        ax.set_title(title)
+        if color is None and n_c > 1:
+            sm = plt.cm.ScalarMappable(
+                cmap=plt.get_cmap(SCATTER_ANIM_CMAP),
+                norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)),
+            )
+            sm.set_array([])
+            fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(alpha=0.3)
+    if own_fig:
+        ax.legend(fontsize=7, markerscale=1.5)
         fig.savefig(path, dpi=140)
         plt.close(fig)
     return ax
@@ -1420,6 +1504,24 @@ def scatter_residual_field(
         max_points=max_points,
         channel=channel,
         draw_y_equals_x=False,
+    )
+
+
+def scatter_residual_field_means(
+    res: dict,
+    *,
+    path: Path,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Static scatter of per-channel means (mean x_d, mean h_d)."""
+    scatter_io_means(
+        res["mean_x"],
+        res["mean_h"],
+        title=f"{res['name']} | {KIND_TITLES['scatter_h_means']}",
+        path=path,
+        xlabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+        ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+        channel=channel,
     )
 
 
@@ -1453,6 +1555,37 @@ def scatter_overlay_by_d(
         )
     ax.set_title("residual field overlay by D")
     ax.legend(fontsize=8, markerscale=2)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def scatter_overlay_means_by_d(
+    results: list[dict],
+    *,
+    path: Path,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Overlay residual-field channel-mean scatters for several D."""
+    if not results:
+        return
+    fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+    cmap = plt.cm.turbo
+    for i, res in enumerate(results):
+        color = cmap(i / max(len(results) - 1, 1))
+        scatter_io_means(
+            res["mean_x"],
+            res["mean_h"],
+            title="",
+            path=path,
+            xlabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+            ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+            channel=channel,
+            label=res.get("overlay_label", f"D={res['D']}"),
+            ax=ax,
+            color=color,
+        )
+    ax.set_title("channel-mean residual field overlay by D")
+    ax.legend(fontsize=8, markerscale=1.5)
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
@@ -1532,19 +1665,13 @@ def scatter_vs_channel(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
-    ch_means = _channel_spatial_means(maps)
-    ch_axis = np.arange(n_c, dtype=np.float64)
     lo = vals.min().item()
     hi = vals.max().item()
-    if PLOT_CHANNEL_MEAN:
-        lo = min(lo, ch_means.min().item())
-        hi = max(hi, ch_means.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
     cmap = plt.cm.viridis
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    mean_labeled = False
     for d in range(n):
         ax.scatter(
             ch_plot,
@@ -1555,16 +1682,6 @@ def scatter_vs_channel(
             linewidths=0,
             label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
         )
-        mean_label = "channel mean" if PLOT_CHANNEL_MEAN and not mean_labeled else None
-        if mean_label is not None:
-            mean_labeled = True
-        _scatter_channel_mean_markers(
-            ax,
-            ch_axis,
-            ch_means[d].numpy(),
-            cmap_color=cmap(d / max(n - 1, 1)),
-            label=mean_label,
-        )
     ax.set_xlabel("channel")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -1572,6 +1689,59 @@ def scatter_vs_channel(
     ax.set_ylim(lo - pad, hi + pad)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7, markerscale=2)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
+def scatter_vs_channel_means(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    ylabel: str,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Static scatter of per-channel spatial means vs channel index (colour = channel)."""
+    assert maps.ndim == 4
+    n, n_c = maps.shape[:2]
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"scatter channel {channel} outside 0..{n_c - 1}")
+        maps = maps[:, channel : channel + 1]
+        n_c = 1
+    ch_means = _channel_spatial_means(maps)
+    ch_axis = np.arange(n_c, dtype=np.float64)
+    lo = ch_means.min().item()
+    hi = ch_means.max().item()
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    cmap = plt.get_cmap(SCATTER_ANIM_CMAP)
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for d in range(n):
+        ax.scatter(
+            ch_axis,
+            ch_means[d].numpy(),
+            s=28,
+            alpha=0.85,
+            c=ch_axis,
+            cmap=SCATTER_ANIM_CMAP,
+            vmin=0,
+            vmax=max(n_c - 1, 1),
+            linewidths=0,
+            zorder=5,
+            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+        )
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
+    ax.set_xlabel("channel")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xlim(-0.5, n_c - 0.5)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=7, markerscale=1.5)
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
@@ -1597,13 +1767,8 @@ def scatter_vs_channel_animation(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
-    ch_means = _channel_spatial_means(maps)
-    ch_axis = np.arange(n_c, dtype=np.float64)
     lo = vals.min().item()
     hi = vals.max().item()
-    if PLOT_CHANNEL_MEAN:
-        lo = min(lo, ch_means.min().item())
-        hi = max(hi, ch_means.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
     lo, hi = lo - pad, hi + pad
 
@@ -1625,13 +1790,6 @@ def scatter_vs_channel_animation(
             vmax=max(n_c - 1, 1),
             linewidths=0,
         )
-        _scatter_channel_mean_markers(
-            ax,
-            ch_axis,
-            ch_means[d].numpy(),
-            color="black",
-            label="channel mean" if PLOT_CHANNEL_MEAN else None,
-        )
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
         ax.set_xlim(-0.5, n_c - 0.5)
         ax.set_ylim(lo, hi)
@@ -1639,8 +1797,56 @@ def scatter_vs_channel_animation(
         ax.set_ylabel(ylabel)
         ax.set_title(f"{title}\nd={d}  ({idx.numel()} features)")
         ax.grid(alpha=0.3)
-        if PLOT_CHANNEL_MEAN:
-            ax.legend(fontsize=7, markerscale=1.5, loc="best")
+        fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
+        plt.close(fig)
+
+    return write_video(frame_dir, out_stem, fps=fps, n_frames=n)
+
+
+def scatter_vs_channel_means_animation(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    frame_dir: Path,
+    out_stem: Path,
+    ylabel: str,
+    fps: float,
+) -> dict[str, Path]:
+    """Animate per-channel spatial means vs channel index across depth."""
+    assert maps.ndim == 4
+    n, n_c = maps.shape[:2]
+    ch_means = _channel_spatial_means(maps)
+    ch_axis = np.arange(n_c, dtype=np.float64)
+    lo = ch_means.min().item()
+    hi = ch_means.max().item()
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = lo - pad, hi + pad
+
+    if frame_dir.exists():
+        shutil.rmtree(frame_dir)
+    frame_dir.mkdir(parents=True)
+
+    for d in range(n):
+        fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
+        ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+        sc = ax.scatter(
+            ch_axis,
+            ch_means[d].numpy(),
+            s=36,
+            alpha=0.9,
+            c=ch_axis,
+            cmap=SCATTER_ANIM_CMAP,
+            vmin=0,
+            vmax=max(n_c - 1, 1),
+            linewidths=0,
+        )
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
+        ax.set_xlim(-0.5, n_c - 0.5)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel("channel")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title}\nd={d}  ({n_c} channel means)")
+        ax.grid(alpha=0.3)
         fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
         plt.close(fig)
 
@@ -1673,13 +1879,8 @@ def scatter_io_animation(
     tracked_in = flat_in[:, idx]
     tracked_out = flat_out[:, idx]
     channels = (idx // spatial).numpy()
-    mean_in = _channel_spatial_means(inputs)
-    mean_out = _channel_spatial_means(outputs)
     lo = min(tracked_in.min().item(), tracked_out.min().item())
     hi = max(tracked_in.max().item(), tracked_out.max().item())
-    if PLOT_CHANNEL_MEAN:
-        lo = min(lo, mean_in.min().item(), mean_out.min().item())
-        hi = max(hi, mean_in.max().item(), mean_out.max().item())
     pad = 0.02 * (hi - lo) if hi > lo else 1.0
     lo, hi = lo - pad, hi + pad
 
@@ -1701,13 +1902,6 @@ def scatter_io_animation(
             vmax=max(n_c - 1, 1),
             linewidths=0,
         )
-        _scatter_channel_mean_markers(
-            ax,
-            mean_in[d].numpy(),
-            mean_out[d].numpy(),
-            color="black",
-            label="channel mean" if PLOT_CHANNEL_MEAN else None,
-        )
         fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
@@ -1716,8 +1910,60 @@ def scatter_io_animation(
         ax.set_title(f"{title}\nd={d}  ({idx.numel()} features, colour=channel)")
         ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.3)
-        if PLOT_CHANNEL_MEAN:
-            ax.legend(fontsize=7, markerscale=1.5, loc="best")
+        fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
+        plt.close(fig)
+
+    return write_video(frame_dir, out_stem, fps=fps, n_frames=n)
+
+
+def scatter_io_means_animation(
+    inputs: torch.Tensor,
+    outputs: torch.Tensor,
+    *,
+    title: str,
+    frame_dir: Path,
+    out_stem: Path,
+    xlabel: str,
+    ylabel: str,
+    fps: float,
+) -> dict[str, Path]:
+    """Animate per-channel spatial means (input mean, output mean) across depth."""
+    assert inputs.shape == outputs.shape and inputs.ndim == 4
+    n, n_c = inputs.shape[:2]
+    mean_in = _channel_spatial_means(inputs)
+    mean_out = _channel_spatial_means(outputs)
+    ch = np.arange(n_c, dtype=np.float64)
+    lo = min(mean_in.min().item(), mean_out.min().item())
+    hi = max(mean_in.max().item(), mean_out.max().item())
+    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = lo - pad, hi + pad
+
+    if frame_dir.exists():
+        shutil.rmtree(frame_dir)
+    frame_dir.mkdir(parents=True)
+
+    for d in range(n):
+        fig, ax = plt.subplots(figsize=(6.5, 6), layout="constrained")
+        ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+        sc = ax.scatter(
+            mean_in[d].numpy(),
+            mean_out[d].numpy(),
+            s=36,
+            alpha=0.9,
+            c=ch,
+            cmap=SCATTER_ANIM_CMAP,
+            vmin=0,
+            vmax=max(n_c - 1, 1),
+            linewidths=0,
+        )
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="channel")
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title}\nd={d}  ({n_c} channel means)")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(alpha=0.3)
         fig.savefig(frame_dir / f"frame_{d:04d}.png", dpi=140)
         plt.close(fig)
 
@@ -1729,7 +1975,19 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
     run_name = res["name"]
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
     map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", "h_CH", "x_CH")]
-    scatter_kinds = [k for k in VIDEO_MAPS if k in ("scatter_ch_x", "scatter_ch_h", "scatter_h")]
+    scatter_kinds = [
+        k
+        for k in VIDEO_MAPS
+        if k
+        in (
+            "scatter_ch_x",
+            "scatter_ch_h",
+            "scatter_h",
+            "scatter_ch_x_means",
+            "scatter_ch_h_means",
+            "scatter_h_means",
+        )
+    ]
 
     for kind in channel_kinds:
         mean_map = res[f"mean_{kind}"]
@@ -1783,7 +2041,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
                 fps=fps,
             )
-        else:
+        elif kind == "scatter_h":
             written = scatter_io_animation(
                 res["mean_x"],
                 res["mean_h"],
@@ -1792,6 +2050,35 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 out_stem=run_dir / kind,
                 xlabel="x_d",
                 ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
+                fps=fps,
+            )
+        elif kind == "scatter_ch_x_means":
+            written = scatter_vs_channel_means_animation(
+                res["mean_x"],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+                fps=fps,
+            )
+        elif kind == "scatter_ch_h_means":
+            written = scatter_vs_channel_means_animation(
+                res["mean_h"],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+                fps=fps,
+            )
+        else:
+            written = scatter_io_means_animation(
+                res["mean_x"],
+                res["mean_h"],
+                title=f"{run_name} | {KIND_TITLES[kind]}",
+                frame_dir=run_dir / "frames" / kind,
+                out_stem=run_dir / kind,
+                xlabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+                ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
                 fps=fps,
             )
         print(f"  {kind}: {[p.name for p in written.values()]}")
@@ -1898,6 +2185,21 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
         channel=SCATTER_CHANNEL,
     )
     scatter_residual_field(res, path=run_dir / "scatter_h.png", channel=SCATTER_CHANNEL)
+    scatter_vs_channel_means(
+        res["mean_x"],
+        title=f"{name} | {KIND_TITLES['scatter_ch_x_means']}",
+        path=run_dir / "scatter_ch_x_means.png",
+        ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+        channel=SCATTER_CHANNEL,
+    )
+    scatter_vs_channel_means(
+        res["mean_h"],
+        title=f"{name} | {KIND_TITLES['scatter_ch_h_means']}",
+        path=run_dir / "scatter_ch_h_means.png",
+        ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+        channel=SCATTER_CHANNEL,
+    )
+    scatter_residual_field_means(res, path=run_dir / "scatter_h_means.png", channel=SCATTER_CHANNEL)
     spaghetti_trajectories(
         res["mean_x"],
         title=f"{name} | spaghetti x_d(t)",
@@ -2030,6 +2332,9 @@ def main() -> None:
             out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
             scatter_overlay_by_d(group, path=out, channel=SCATTER_CHANNEL)
             print(f"overlay scatter -> {out}")
+            out_means = OUT_DIR / f"scatter_h_means_overlay_{tag}.png"
+            scatter_overlay_means_by_d(group, path=out_means, channel=SCATTER_CHANNEL)
+            print(f"overlay scatter means -> {out_means}")
 
 
 if __name__ == "__main__":
