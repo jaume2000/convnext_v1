@@ -83,24 +83,50 @@ OLD_EXPERIMENTS = [
 # Active RK grid (what __main__ runs).
 REPEATS = [1, 2, 4, 8, 16, 32, 64, 128]
 METHODS = ["RK1", "RK2", "RK4"]
+WEIGHT_INTERPOLATIONS = ["plain", "bilinear"]
 EXPERIMENTS = [
     {
-        "name": f"R{r}_ES{1 / r:g}_{m}",
+        "name": f"R{r}_ES{1 / r:g}_{m}_{wi}",
         "repeats": r,
         "euler_step": 1 / r,
         "method": m,
+        "weight_interpolation": wi,
     }
     for r in REPEATS
     for m in METHODS
+    for wi in WEIGHT_INTERPOLATIONS
 ]
 # Extra: R10 ES=0.1 with all RKs; R10/R100 ES=1 Euler-only (no RK sweep).
 EXPERIMENTS += [
-    {"name": f"R10_ES0.1_{m}", "repeats": 10, "euler_step": 0.1, "method": m}
+    {
+        "name": f"R10_ES0.1_{m}_{wi}",
+        "repeats": 10,
+        "euler_step": 0.1,
+        "method": m,
+        "weight_interpolation": wi,
+    }
     for m in METHODS
+    for wi in WEIGHT_INTERPOLATIONS
 ]
 EXPERIMENTS += [
-    {"name": "R10_ES1_RK1", "repeats": 10, "euler_step": 1, "method": "RK1"},
-    {"name": "R100_ES1_RK1", "repeats": 100, "euler_step": 1, "method": "RK1"},
+    {
+        "name": f"R10_ES1_RK1_{wi}",
+        "repeats": 10,
+        "euler_step": 1,
+        "method": "RK1",
+        "weight_interpolation": wi,
+    }
+    for wi in WEIGHT_INTERPOLATIONS
+]
+EXPERIMENTS += [
+    {
+        "name": f"R100_ES1_RK1_{wi}",
+        "repeats": 100,
+        "euler_step": 1,
+        "method": "RK1",
+        "weight_interpolation": wi,
+    }
+    for wi in WEIGHT_INTERPOLATIONS
 ]
 
 
@@ -118,9 +144,10 @@ def experiment_name(spec: dict, blocks: list[int]) -> str:
         return spec["name"]
     es = spec["euler_step"]
     method = spec.get("method", "RK1")
+    wi = spec.get("weight_interpolation", "plain")
     if "repeats" in spec:
-        return f"R{spec['repeats']}_ES{es:g}_{method}"
-    return f"B{'-'.join(map(str, blocks))}_ES{es:g}_{method}".replace("/", "div")
+        return f"R{spec['repeats']}_ES{es:g}_{method}_{wi}"
+    return f"B{'-'.join(map(str, blocks))}_ES{es:g}_{method}_{wi}".replace("/", "div")
 
 
 def load_interpoled_resnet() -> InterpoledResNet50:
@@ -134,13 +161,14 @@ def apply_experiment(model: InterpoledResNet50, spec: dict) -> tuple[list[int], 
     blocks = resolve_blocks(spec, n_blocks)
     euler_step = spec["euler_step"]
     method = spec.get("method", "RK1")
-    model.set_schedule(blocks, euler_step, method=method)
+    wi = spec.get("weight_interpolation", "plain")
+    model.set_schedule(blocks, euler_step, method=method, weight_interpolation=wi)
     name = experiment_name(spec, blocks)
     print(
         f"\n=== {name} ===\n"
         f"stage3 schedule: layer3[0] + "
         f"{','.join(f'layer3[{i + 1}]' for i in blocks)}  "
-        f"(euler_step={euler_step:g}, method={method})"
+        f"(euler_step={euler_step:g}, method={method}, weight_interpolation={wi})"
     )
     return blocks, name
 
@@ -177,6 +205,7 @@ if __name__ == "__main__":
             "blocks": ",".join(map(str, blocks)),
             "euler_step": spec["euler_step"],
             "method": spec.get("method", "RK1"),
+            "weight_interpolation": spec.get("weight_interpolation", "plain"),
             "top1acc": last_metric(history, "top1acc"),
             "loss": last_metric(history, "loss"),
         })
@@ -186,10 +215,10 @@ if __name__ == "__main__":
     pd.DataFrame(results).to_csv(csv_path, index=False)
 
     print("\n=== summary ===")
-    print(f"{'name':<28} {'method':<6} {'euler':>8} {'top1':>10} {'loss':>10}")
+    print(f"{'name':<36} {'wi':<10} {'method':<6} {'euler':>8} {'top1':>10} {'loss':>10}")
     for row in results:
         print(
-            f"{row['name']:<28} {row['method']:<6} {row['euler_step']:>8g} "
-            f"{row['top1acc']:>10.5f} {row['loss']:>10.6f}"
+            f"{row['name']:<36} {row['weight_interpolation']:<10} {row['method']:<6} "
+            f"{row['euler_step']:>8g} {row['top1acc']:>10.5f} {row['loss']:>10.6f}"
         )
     print(f"\nSaved {len(results)} rows to {csv_path}")

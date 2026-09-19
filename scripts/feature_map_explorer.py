@@ -489,10 +489,11 @@ def trajectory_stats(
     norm_h_i = torch.zeros(n, D + 1, dtype=torch.float64)
     norm_x_i = torch.zeros(n, D + 1, dtype=torch.float64)
     cos_flat_i = torch.zeros(n, D, dtype=torch.float64)  # 1 - cos(h_d, h_{d+1}) flat
-    cos_spatial_i = torch.zeros(n, D, dtype=torch.float64)
+    omega_spatial_i = torch.zeros(n, D, dtype=torch.float64)  # mean_{i,j} arccos/ES
+    omega_channel_i = torch.zeros(n, D, dtype=torch.float64)  # mean_c arccos/ES on HW
     cos_x_flat_i = torch.zeros(n, D, dtype=torch.float64)
     cos_x_spatial_i = torch.zeros(n, D, dtype=torch.float64)
-    omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES
+    omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES flat
     align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
     rect_L_i = torch.zeros(n, dtype=torch.float64)
     rect_N_i = torch.zeros(n, dtype=torch.float64)
@@ -574,12 +575,15 @@ def trajectory_stats(
             ).double().cpu()
 
             loc_cos_h = F.cosine_similarity(h, h_next, dim=1).clamp(-1.0, 1.0)
-            loc_h = 1.0 - loc_cos_h  # kept for spatial 1-cos series / correlation
             loc_omega_h = torch.arccos(loc_cos_h) / max(es, 1e-12)
+            # Per-channel ω: each channel is an HW vector.
+            cos_ch = F.cosine_similarity(h.flatten(2), h_next.flatten(2), dim=2).clamp(-1.0, 1.0)
+            omega_ch = torch.arccos(cos_ch) / max(es, 1e-12)
             loc_x = 1.0 - F.cosine_similarity(x, x_next, dim=1)
             cos_map_h[d] += w * loc_omega_h.sum(0)
             cos_map_x[d] += w * loc_x.sum(0)
-            cos_spatial_i[start : start + bsz, d] = loc_h.mean(dim=(1, 2)).double().cpu()
+            omega_spatial_i[start : start + bsz, d] = loc_omega_h.mean(dim=(1, 2)).double().cpu()
+            omega_channel_i[start : start + bsz, d] = omega_ch.mean(dim=1).double().cpu()
             cos_x_spatial_i[start : start + bsz, d] = loc_x.mean(dim=(1, 2)).double().cpu()
             l2_map_h[d] += w * (h - h_next).norm(dim=1).sum(0)
             x, h = x_next, h_next
@@ -618,13 +622,14 @@ def trajectory_stats(
     norm_h_over_x_mean, norm_h_over_x_std = mean_std(norm_h_over_x_i)
 
     cos_flat_mean, cos_flat_std = mean_std(cos_flat_i)
-    cos_spatial_mean, cos_spatial_std = mean_std(cos_spatial_i)
+    omega_spatial_mean, omega_spatial_std = mean_std(omega_spatial_i)
+    omega_channel_mean, omega_channel_std = mean_std(omega_channel_i)
     omega_mean, omega_std = mean_std(omega_i)
     align_mean, align_std = mean_std(align_h0_i)
 
-    # Correlation between flat and spatial 1-cos series (on the mean curves).
-    if D >= 2 and cos_flat_mean.std() > 0 and cos_spatial_mean.std() > 0:
-        cos_flat_spatial_corr = float(np.corrcoef(cos_flat_mean, cos_spatial_mean)[0, 1])
+    # Correlation between flat and spatial ω series (on the mean curves).
+    if D >= 2 and omega_mean.std() > 0 and omega_spatial_mean.std() > 0:
+        cos_flat_spatial_corr = float(np.corrcoef(omega_mean, omega_spatial_mean)[0, 1])
     else:
         cos_flat_spatial_corr = float("nan")
 
@@ -650,8 +655,10 @@ def trajectory_stats(
             "t": (torch.arange(D).numpy() * es),
             "cos_dist_h": cos_flat_mean,
             "cos_dist_h_std": cos_flat_std,
-            "cos_dist_h_spatial": cos_spatial_mean,
-            "cos_dist_h_spatial_std": cos_spatial_std,
+            "omega_h_spatial": omega_spatial_mean,
+            "omega_h_spatial_std": omega_spatial_std,
+            "omega_h_channel": omega_channel_mean,
+            "omega_h_channel_std": omega_channel_std,
             "omega_h": omega_mean,
             "omega_h_std": omega_std,
             "cos_dist_x": mean_std(cos_x_flat_i)[0],
@@ -786,7 +793,8 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
     )
 
     cos_h = []
-    cos_spatial = []
+    omega_spatial = []
+    omega_channel = []
     omega = []
     cos_x = []
     cos_x_spatial = []
@@ -797,9 +805,16 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
         cos_x.append(
             (1 - F.cosine_similarity(mean_x[d].flatten(), mean_x[d + 1].flatten(), dim=0)).item()
         )
-        loc_h = 1 - F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0)
+        loc_omega = torch.arccos(
+            F.cosine_similarity(mean_h[d], mean_h[d + 1], dim=0).clamp(-1.0, 1.0)
+        ) / max(es, 1e-12)
+        ch_cos = F.cosine_similarity(
+            mean_h[d].flatten(1), mean_h[d + 1].flatten(1), dim=1
+        ).clamp(-1.0, 1.0)
+        ch_omega = torch.arccos(ch_cos) / max(es, 1e-12)
         loc_x = 1 - F.cosine_similarity(mean_x[d], mean_x[d + 1], dim=0)
-        cos_spatial.append(loc_h.mean().item())
+        omega_spatial.append(loc_omega.mean().item())
+        omega_channel.append(ch_omega.mean().item())
         cos_x_spatial.append(loc_x.mean().item())
     pairs = pd.DataFrame(
         {
@@ -808,8 +823,10 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "t": [d * es for d in range(D)],
             "cos_dist_h": cos_h,
             "cos_dist_h_std": 0.0,
-            "cos_dist_h_spatial": cos_spatial,
-            "cos_dist_h_spatial_std": 0.0,
+            "omega_h_spatial": omega_spatial,
+            "omega_h_spatial_std": 0.0,
+            "omega_h_channel": omega_channel,
+            "omega_h_channel_std": 0.0,
             "omega_h": omega,
             "omega_h_std": 0.0,
             "cos_dist_x": cos_x,
@@ -1293,19 +1310,26 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
 
-    # (1,1) spatial mean 1-cos (kept; flat series only used for correlation)
+    # (1,1) mean angular speed: per-location (C-vec) and per-channel (HW-vec)
     ax = axes[1, 1]
     _plot_mean_std(
         ax,
         t_pair,
-        pairs["cos_dist_h_spatial"],
-        pairs.get("cos_dist_h_spatial_std", 0.0),
-        label=label,
+        pairs["omega_h_spatial"],
+        pairs.get("omega_h_spatial_std", 0.0),
+        label=r"per-location $\mathrm{mean}_{i,j}\,\omega$",
+    )
+    _plot_mean_std(
+        ax,
+        t_pair,
+        pairs["omega_h_channel"],
+        pairs.get("omega_h_channel_std", 0.0),
+        label=r"per-channel $\mathrm{mean}_c\,\omega$",
     )
     ax.set(
         xlabel="t",
-        ylabel=r"mean$_{i,j}\,[1-\cos(h_d[i,j], h_{d+1}[i,j])]$",
-        title="mean per-location cosine distance (h)",
+        ylabel=r"$\omega$ [rad / t]",
+        title=r"mean angular speed (spatial / channel)",
     )
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
@@ -1314,7 +1338,7 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     plt.close(fig)
 
     corr = res.get("cos_flat_spatial_corr", float("nan"))
-    print(f"  corr(flat 1-cos, spatial 1-cos) = {corr:.6f}")
+    print(f"  corr(flat ω, spatial ω) = {corr:.6f}")
     print(
         f"  rectitude R = N/L : mean={res.get('rectitude_mean', float('nan')):.6f} "
         f"± {res.get('rectitude_std', float('nan')):.6f} "

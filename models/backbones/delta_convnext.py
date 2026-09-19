@@ -143,17 +143,26 @@ class DeltaConvNext(ConvNextV1):
         self._reparametrize_deltas(mean_deltas)
 
     def setStage3Length(self, stage3Length: int):
-        if self.useDeltas:
-            raise ValueError("Cannot set stage3 length with deltas enabled")
+        """Unroll stage3 to ``stage3Length`` steps with EU = base_length / stage3Length.
+
+        Keeps the already-loaded ``sharedBlock`` and ``tail``. When ``useDeltas`` is
+        True, each new step gets its own zero-init delta Parameters.
+        """
         self.extendedStage3Length = stage3Length
-        self.eulerStep = self.stage3_length / self.extendedStage3Length
-        deltablock = DeltaConvnextBlock(
+        self.eulerStep = self.stage3_length / stage3Length
+        deltablocks = [
+            DeltaConvnextBlock(
                 self.sharedBlock,
                 stochasticDepth=0.0,
-                useDeltas=False,
+                useDeltas=self.useDeltas,
                 eulerStep=self.eulerStep,
             )
-        self.deltifiedStage3 = nn.Sequential(*[deltablock for i in range(stage3Length)], *self.tail)
+            for _ in range(stage3Length)
+        ]
+        self.deltifiedStage3 = nn.Sequential(*deltablocks, *self.tail)
+        self.stage3_length = stage3Length
+        mode = "shared-only" if not self.useDeltas else f"{stage3Length} delta blocks"
+        print(f"Stage3 length -> {stage3Length} ({mode}, eulerStep={self.eulerStep:g})")
 
     def freezeStages(self, stages: list[int]):
         if 0 in stages:
