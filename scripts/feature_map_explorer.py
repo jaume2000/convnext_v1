@@ -19,6 +19,7 @@ Or locally:
   python scripts/feature_map_explorer.py --list-only
   python scripts/feature_map_explorer.py --only resnet50_baseline_R1_ES1_c289_n1
   python scripts/feature_map_explorer.py --only convnext_R100_ES0.01_bilinear_c289_n1
+  python scripts/feature_map_explorer.py --force   # overwrite existing figures / recompute
 """
 
 from __future__ import annotations
@@ -106,8 +107,8 @@ RUNS_SHARED: list[dict] = [
     {"name": "shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_FM_COMMON},
 ]
 
-# Interpoled: core schedules × each model (plain θ), then bilinear θ probes,
-# then ConvNeXt RK4 probes.
+# Interpoled: bilinear θ first (swin → … → convnext), then RK4 probes,
+# then plain θ last (swin → … → convnext).
 _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("baseline_R1_ES1_c289_n1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0}),
     ("baseline_R1_ES1_c289_n1_ignore1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1}),
@@ -119,8 +120,9 @@ _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("R100_ES1_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
 ]
 # Bilinear weight interpolation (θ=(1-α)θ_k+αθ_{k+1}), same grids as the
-# interpolation scripts. Models: convnext / swin / resnet50 / resnet101.
-_FM_BILINEAR_MODELS = ("convnext", "convnext_droppath0", "resnet50", "resnet101", "swin")
+# interpolation scripts. Sweep order: swin first → convnext last.
+_FM_BILINEAR_MODELS = ("swin", "resnet101", "resnet50", "convnext_droppath0", "convnext")
+_FM_PLAIN_MODELS = ("swin", "resnet101", "resnet50", "convnext_droppath0", "convnext")
 _FM_BILINEAR_SPECS: list[tuple[str, dict]] = [
     ("R100_ES0.01_bilinear_c289_n1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0}),
     ("R100_ES0.01_bilinear_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1}),
@@ -136,25 +138,13 @@ INTERPOLED_EXPERIMENTS: list[dict] = [
         "class_id": 289,
         "max_images": 1,
         "batch_size": 1,
-        **kw,
-    }
-    for model in INTERPOLED_MODELS
-    for suffix, kw in _FM_INTERP_SPECS
-]
-INTERPOLED_EXPERIMENTS += [
-    {
-        "model": model,
-        "name": f"{model}_{suffix}",
-        "class_id": 289,
-        "max_images": 1,
-        "batch_size": 1,
         "weight_interpolation": "bilinear",
         **kw,
     }
     for model in _FM_BILINEAR_MODELS
     for suffix, kw in _FM_BILINEAR_SPECS
 ]
-# RK4 probe: R100 ES=0.01 on both ConvNeXt checkpoints (± ignore), plain + bilinear.
+# RK4 probe: R100 ES=0.01 on both ConvNeXt checkpoints (± ignore), bilinear then plain.
 INTERPOLED_EXPERIMENTS += [
     {
         "model": model,
@@ -169,9 +159,22 @@ INTERPOLED_EXPERIMENTS += [
         "ignore_top_k_channels": ign,
         **({"weight_interpolation": "bilinear"} if wi == "bilinear" else {}),
     }
-    for model in ("convnext", "convnext_droppath0")
-    for wi, wi_sfx in (("plain", ""), ("bilinear", "_bilinear"))
+    for model in ("convnext_droppath0", "convnext")
+    for wi, wi_sfx in (("bilinear", "_bilinear"), ("plain", ""))
     for ign_sfx, ign in (("", 0), ("_ignore1", 1))
+]
+# Plain θ last (swin → … → convnext).
+INTERPOLED_EXPERIMENTS += [
+    {
+        "model": model,
+        "name": f"{model}_{suffix}",
+        "class_id": 289,
+        "max_images": 1,
+        "batch_size": 1,
+        **kw,
+    }
+    for model in _FM_PLAIN_MODELS
+    for suffix, kw in _FM_INTERP_SPECS
 ]
 
 INTERPOLED_MODEL_KEYS = (
@@ -233,9 +236,13 @@ CMAP_H = "RdBu_r"
 CMAP_COS = "magma"
 CMAP_NORM = "magma"
 SHARED_SCALE = True
-SAVE_TENSORS = False
+# Persist mean maps so later runs can add figures without re-integrating.
+SAVE_TENSORS = True
+# Skip writing an artifact when a non-empty file already exists (use --force to overwrite).
+SKIP_EXISTING_FIGURES = True
+FORCE_RECOMPUTE = False
 GRID_MAX_FRAMES = 36
-SCATTER_MAX_POINTS = 99999999
+SCATTER_MAX_POINTS = 8000
 # None = all channels in static scatter; int = that channel only.
 SCATTER_CHANNEL: int | None = None
 # After all RUNS, write a combined residual scatter coloured/legended by D.
@@ -243,15 +250,21 @@ SCATTER_OVERLAY_BY_D = True
 # Animation: sample N features once, track the same indices across depth.
 SCATTER_ANIM_MAX_POINTS = 8000
 SCATTER_ANIM_SEED = 0
+# Cap how many depths a static overlay draws (D=900 × all features OOMs hard).
+SCATTER_STATIC_MAX_DEPTHS = 48
 # turbo: high local contrast (nearby channels look distinct); better than viridis here.
 SCATTER_ANIM_CMAP = "turbo"
 # Spaghetti: trajectories d ↦ value for a fixed feature sample (colour = channel).
-SPAGHETTI_MAX_LINES = 500
+SPAGHETTI_MAX_LINES = 200
 SPAGHETTI_SEED = 0
 # Building a GIF loads every frame into RAM — skip when D is large.
-GIF_MAX_FRAMES = 9999
+# (9999 used to force GIFs for D=500 C×H maps and OOM'd ~5GB on 8k-wide frames.)
+GIF_MAX_FRAMES = 256
+# Extra guard: total RGB pixels across frames (w*h*n). ~200MP ≈ 0.6GB raw.
+GIF_MAX_PIXELS = 200_000_000
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
 KEEP_FRAMES = True
+MEAN_MAPS_NAME = "mean_maps.pt"
 FIGSIZE, DPI = (4.4, 4.2), 100
 # C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
 CH_PX_PER_CELL = 8
@@ -282,6 +295,64 @@ KIND_TITLES = {
 }
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# Truncated ffmpeg kills leave ~48-byte ftyp stubs; treat those as missing.
+_MIN_VIDEO_BYTES = 1024
+
+
+def _exists_nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _exists_video(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size >= _MIN_VIDEO_BYTES
+
+
+def should_write(path: Path) -> bool:
+    """False when SKIP_EXISTING_FIGURES and a non-empty file already exists (unless FORCE)."""
+    if FORCE_RECOMPUTE or not SKIP_EXISTING_FIGURES:
+        return True
+    if path.suffix.lower() in (".mp4", ".gif"):
+        return not _exists_video(path)
+    return not _exists_nonempty(path)
+
+
+def _gif_frame_budget_ok(n_frames: int, frame_dir: Path | None = None) -> bool:
+    """False when a GIF would load too many frames / pixels into RAM."""
+    if n_frames > GIF_MAX_FRAMES:
+        return False
+    if frame_dir is None:
+        return True
+    first = next(iter(sorted(frame_dir.glob("frame_*.png"))), None)
+    if first is None:
+        return True
+    with Image.open(first) as im:
+        w, h = im.size
+    return w * h * n_frames <= GIF_MAX_PIXELS
+
+
+def video_products_ready(out_stem: Path, n_frames: int) -> bool:
+    """True if the mp4/gif products write_video would produce already exist."""
+    if FORCE_RECOMPUTE or not SKIP_EXISTING_FIGURES:
+        return False
+    mp4_ok = _exists_video(out_stem.with_suffix(".mp4"))
+    frame_dir = out_stem.parent / "frames" / out_stem.name
+    # Only require a gif when we would actually attempt to write one.
+    if not _gif_frame_budget_ok(n_frames, frame_dir if frame_dir.is_dir() else None):
+        return mp4_ok
+    return mp4_ok and _exists_video(out_stem.with_suffix(".gif"))
+
+
+def write_static(path: Path, fn) -> None:
+    """Run ``fn()`` only if ``path`` should be written; otherwise print a skip line."""
+    if not should_write(path):
+        print(f"  skip existing {path.name}")
+        return
+    print(f"  writing {path.name} …", flush=True)
+    fn()
+    plt.close("all")
+    gc.collect()
 
 
 # --------------------------------------------------------------------------- helpers
@@ -1133,6 +1204,9 @@ def render_frames(
 
 
 def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: int = 5) -> None:
+    if not should_write(path):
+        print(f"  skip existing {path.name}")
+        return
     n = len(maps)
     ncols = min(ncols, n)
     nrows = -(-n // ncols)
@@ -1220,8 +1294,10 @@ def _write_mp4_ffmpeg(frame_dir: Path, mp4: Path, fps: float) -> bool:
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0 and mp4.is_file():
+        if proc.returncode == 0 and _exists_video(mp4):
             return True
+        if mp4.is_file() and not _exists_video(mp4):
+            mp4.unlink(missing_ok=True)
         print(f"  ffmpeg {' '.join(codec_args)} failed: {proc.stderr.strip()[:200]}")
     return False
 
@@ -1251,34 +1327,51 @@ def _write_mp4_opencv(frame_dir: Path, mp4: Path, fps: float) -> bool:
             img = cv2.resize(img, (w, h))
         writer.write(img)
     writer.release()
-    return mp4.is_file() and mp4.stat().st_size > 0
+    if not _exists_video(mp4):
+        if mp4.is_file():
+            mp4.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -> dict[str, Path]:
     """Write mp4 (ffmpeg or OpenCV) and/or gif. Never delete frames if nothing was written."""
     written: dict[str, Path] = {}
     mp4 = out_stem.with_suffix(".mp4")
-    if _write_mp4_ffmpeg(frame_dir, mp4, fps) or _write_mp4_opencv(frame_dir, mp4, fps):
-        written["mp4"] = mp4
+    gif = out_stem.with_suffix(".gif")
+    budget_ok = _gif_frame_budget_ok(n_frames, frame_dir)
 
-    # GIF loads every frame in RAM. Prefer mp4 when D is large; if mp4 failed, always
-    # write a gif anyway so the run still produces a viewable animation.
-    want_gif = n_frames <= GIF_MAX_FRAMES or "mp4" not in written
-    if want_gif:
-        images = _load_rgb_frames(frame_dir)
-        gif = out_stem.with_suffix(".gif")
-        images[0].save(
-            gif,
-            save_all=True,
-            append_images=images[1:],
-            duration=max(1, int(round(1000 / max(fps, 1e-3)))),
-            loop=0,
+    if should_write(mp4):
+        if _write_mp4_ffmpeg(frame_dir, mp4, fps) or _write_mp4_opencv(frame_dir, mp4, fps):
+            written["mp4"] = mp4
+    elif _exists_video(mp4):
+        written["mp4"] = mp4
+        print(f"  skip existing {mp4.name}")
+
+    # GIF loads every frame in RAM — only attempt when the frame/pixel budget fits.
+    if "mp4" not in written and not budget_ok:
+        print(
+            f"  WARNING: no mp4 for {out_stem.name} and GIF budget exceeded "
+            f"(n={n_frames} > {GIF_MAX_FRAMES} or too many pixels); keeping frames"
         )
-        written["gif"] = gif
-        for im in images:
-            im.close()
-        if n_frames > GIF_MAX_FRAMES and "mp4" not in written:
-            print(f"  no ffmpeg/opencv mp4 — wrote gif with {n_frames} frames instead")
+    elif budget_ok:
+        if should_write(gif):
+            images = _load_rgb_frames(frame_dir)
+            images[0].save(
+                gif,
+                save_all=True,
+                append_images=images[1:],
+                duration=max(1, int(round(1000 / max(fps, 1e-3)))),
+                loop=0,
+            )
+            written["gif"] = gif
+            for im in images:
+                im.close()
+        elif _exists_video(gif):
+            written["gif"] = gif
+            print(f"  skip existing {gif.name}")
+    elif "mp4" in written:
+        print(f"  skip gif for {out_stem.name} (n={n_frames} frames / pixel budget)")
 
     if not written:
         print(f"  WARNING: no video written for {out_stem.name}; keeping frames in {frame_dir}")
@@ -1294,6 +1387,10 @@ def map_tensor(res: dict, kind: str) -> torch.Tensor:
 
 
 def save_inputs(spec: dict, dataset, class_names: list[str], run_dir: Path) -> None:
+    out = run_dir / "inputs.png"
+    if not should_write(out):
+        print(f"  skip existing {out.name}")
+        return
     indices = spec["image_indices"]
     cid = spec["class_id"]
     subject = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked images"
@@ -1308,7 +1405,7 @@ def save_inputs(spec: dict, dataset, class_names: list[str], run_dir: Path) -> N
         f"{spec['name']} — averaging over {subject}"
         + (f" — showing {len(preview)}" if len(preview) < len(indices) else "")
     )
-    fig.savefig(run_dir / "inputs.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1352,6 +1449,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "PR_depth_on_mean_traj": res.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": res.get("PR_spatial_on_mean_traj"),
         "scatter_channel": SCATTER_CHANNEL,
+        "resolved_channels": list(res.get("resolved_channels") or []),
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     if SAVE_TENSORS:
@@ -1364,8 +1462,65 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
                 "norm_h": res["norm_h"],
                 "l2_h": res["l2_h"],
             },
-            run_dir / "mean_maps.pt",
+            run_dir / MEAN_MAPS_NAME,
         )
+
+
+def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
+    """Reload maps + tables from a previous run (skip trajectory integration)."""
+    if FORCE_RECOMPUTE:
+        return None
+    pt = run_dir / MEAN_MAPS_NAME
+    cfg_path = run_dir / "config.json"
+    norms_path = run_dir / "table_norms.csv"
+    pairs_path = run_dir / "table_pairs.csv"
+    if not (pt.is_file() and cfg_path.is_file() and norms_path.is_file() and pairs_path.is_file()):
+        return None
+    cfg = json.loads(cfg_path.read_text())
+    try:
+        maps = torch.load(pt, map_location="cpu", weights_only=True)
+    except TypeError:
+        maps = torch.load(pt, map_location="cpu")
+    required = ("mean_x", "mean_h", "cos_h", "cos_x", "norm_h", "l2_h")
+    if any(k not in maps for k in required):
+        return None
+    res = {
+        "name": cfg.get("name", spec["name"]),
+        "spec": spec,
+        "D": int(cfg["D"]),
+        "euler_step": float(cfg["euler_step"]),
+        "method": cfg.get("method") or "RK1",
+        "blocks": list(cfg.get("blocks") or []),
+        "model": cfg.get("model"),
+        "weight_interpolation": cfg.get("weight_interpolation", "plain"),
+        "overlay_label": cfg.get("name", spec["name"]),
+        "n_images": int(cfg.get("n_images", len(spec["image_indices"]))),
+        "ignored_channels": list(cfg.get("ignored_channels") or []),
+        "resolved_channels": list(cfg.get("resolved_channels") or []),
+        "mean_x": maps["mean_x"],
+        "mean_h": maps["mean_h"],
+        "cos_h": maps["cos_h"],
+        "cos_x": maps["cos_x"],
+        "norm_h": maps["norm_h"],
+        "l2_h": maps["l2_h"],
+        "norms": pd.read_csv(norms_path),
+        "pairs": pd.read_csv(pairs_path),
+        "cos_flat_spatial_corr": cfg.get("cos_flat_spatial_corr"),
+        "rectitude_mean": cfg.get("rectitude_mean"),
+        "rectitude_std": cfg.get("rectitude_std"),
+        "L_mean": cfg.get("L_mean"),
+        "N_mean": cfg.get("N_mean"),
+        "PR_depth_mean": cfg.get("PR_depth_mean"),
+        "PR_depth_std": cfg.get("PR_depth_std"),
+        "PR_spatial_mean": cfg.get("PR_spatial_mean"),
+        "PR_spatial_std": cfg.get("PR_spatial_std"),
+        "PR_depth_on_mean_traj": cfg.get("PR_depth_on_mean_traj"),
+        "PR_spatial_on_mean_traj": cfg.get("PR_spatial_on_mean_traj"),
+    }
+    scalars_path = run_dir / "table_scalars.csv"
+    if scalars_path.is_file():
+        res["scalars"] = pd.read_csv(scalars_path)
+    return res
 
 
 def _plot_mean_std(ax, x, mean, std, *, label: str, **plot_kw):
@@ -1376,6 +1531,10 @@ def _plot_mean_std(ax, x, mean, std, *, label: str, **plot_kw):
 
 
 def save_metric_plots(res: dict, run_dir: Path) -> None:
+    out = run_dir / "metrics.png"
+    if not should_write(out):
+        print(f"  skip existing {out.name}")
+        return
     norms, pairs = res["norms"], res["pairs"]
     es = res["euler_step"]
     label = f"{res['name']} (D={res['D']}, n={res['n_images']})"
@@ -1448,7 +1607,7 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
 
-    fig.savefig(run_dir / "metrics.png", dpi=140)
+    fig.savefig(out, dpi=140)
     plt.close(fig)
 
     corr = res.get("cos_flat_spatial_corr", float("nan"))
@@ -1514,12 +1673,12 @@ def scatter_io(
     if draw_y_equals_x:
         ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    for d in range(n):
-        a = flat_in[d]
-        b = flat_out[d]
-        if a.numel() > max_points:
-            idx = torch.randperm(a.numel())[:max_points]
-            a, b = a[idx], b[idx]
+    # Fixed feature sample across depths; subsample depths when D is huge.
+    feat_idx = _sample_feature_indices(flat_in.shape[1], max_points, SCATTER_ANIM_SEED)
+    depth_idx = _depth_indices(n)
+    for d in depth_idx:
+        a = flat_in[d, feat_idx]
+        b = flat_out[d, feat_idx]
         c_kw = {}
         if color is not None:
             c_kw["color"] = color
@@ -1531,9 +1690,9 @@ def scatter_io(
             s=4,
             alpha=0.25,
             linewidths=0,
-            label=(label if d == 0 else None)
+            label=(label if d == depth_idx[0] else None)
             if label is not None
-            else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
+            else (f"d={d}" if len(depth_idx) <= 12 or d in (0, n // 2, n - 1) else None),
             **c_kw,
         )
     ax.set_xlabel(xlabel)
@@ -1583,7 +1742,8 @@ def scatter_io_means(
     cmap = plt.cm.viridis
     ch_colors = np.arange(n_c, dtype=np.float64)
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    for d in range(n):
+    depth_idx = _depth_indices(n)
+    for d in depth_idx:
         c_kw = {}
         if color is not None:
             c_kw["color"] = color
@@ -1599,9 +1759,9 @@ def scatter_io_means(
             alpha=0.85,
             linewidths=0,
             zorder=5,
-            label=(label if d == 0 else None)
+            label=(label if d == depth_idx[0] else None)
             if label is not None
-            else (f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None),
+            else (f"d={d}" if len(depth_idx) <= 12 or d in (0, n // 2, n - 1) else None),
             **c_kw,
         )
     ax.set_xlabel(xlabel)
@@ -1735,6 +1895,13 @@ def _sample_feature_indices(n_feat: int, max_points: int, seed: int) -> torch.Te
     return torch.arange(n_feat)
 
 
+def _depth_indices(n: int, max_depths: int = SCATTER_STATIC_MAX_DEPTHS) -> np.ndarray:
+    """Subsample depth indices for static overlays (keeps endpoints)."""
+    if n <= max_depths:
+        return np.arange(n, dtype=int)
+    return np.unique(np.round(np.linspace(0, n - 1, max_depths)).astype(int))
+
+
 def spaghetti_trajectories(
     maps: torch.Tensor,
     *,
@@ -1778,6 +1945,43 @@ def spaghetti_trajectories(
     plt.close(fig)
 
 
+def spaghetti_trajectories_means(
+    maps: torch.Tensor,
+    *,
+    title: str,
+    path: Path,
+    ylabel: str,
+    euler_step: float,
+    channel: int | None = SCATTER_CHANNEL,
+) -> None:
+    """Plot d ↦ spatial-mean trajectories, one line per channel (colour = channel)."""
+    assert maps.ndim == 4
+    n, n_c = maps.shape[:2]
+    if channel is not None:
+        if not 0 <= channel < n_c:
+            raise ValueError(f"spaghetti channel {channel} outside 0..{n_c - 1}")
+        maps = maps[:, channel : channel + 1]
+        n_c = 1
+    ys = _channel_spatial_means(maps).numpy()  # [T, C]
+    t = np.arange(n, dtype=np.float64) * float(euler_step)
+    cmap = plt.get_cmap(SCATTER_ANIM_CMAP)
+    colors = cmap(np.arange(n_c) / max(n_c - 1, 1))
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.0), layout="constrained")
+    ax.axhline(0.0, color="0.85", lw=1, zorder=0)
+    for c in range(n_c):
+        ax.plot(t, ys[:, c], color=colors[c], alpha=0.55, lw=1.0, solid_capstyle="round")
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
+    ax.set_xlabel("t = d · ES")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"{title}\n({n_c} channel means)")
+    ax.grid(alpha=0.3)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+
 def scatter_vs_channel(
     maps: torch.Tensor,
     *,
@@ -1810,7 +2014,8 @@ def scatter_vs_channel(
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
     cmap = plt.cm.viridis
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    for d in range(n):
+    depth_idx = _depth_indices(n)
+    for d in depth_idx:
         ax.scatter(
             ch_plot,
             vals[d].numpy(),
@@ -1818,7 +2023,7 @@ def scatter_vs_channel(
             alpha=0.25,
             c=[cmap(d / max(n - 1, 1))],
             linewidths=0,
-            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+            label=f"d={d}" if len(depth_idx) <= 12 or d in (0, n // 2, n - 1) else None,
         )
     ax.set_xlabel("channel")
     ax.set_ylabel(ylabel)
@@ -1856,7 +2061,8 @@ def scatter_vs_channel_means(
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
-    for d in range(n):
+    depth_idx = _depth_indices(n)
+    for d in depth_idx:
         ax.scatter(
             ch_axis,
             ch_means[d].numpy(),
@@ -1868,7 +2074,7 @@ def scatter_vs_channel_means(
             vmax=max(n_c - 1, 1),
             linewidths=0,
             zorder=5,
-            label=f"d={d}" if n <= 12 or d in (0, n // 2, n - 1) else None,
+            label=f"d={d}" if len(depth_idx) <= 12 or d in (0, n // 2, n - 1) else None,
         )
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)))
     sm.set_array([])
@@ -2129,44 +2335,63 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
 
     for kind in channel_kinds:
         mean_map = res[f"mean_{kind}"]
+        n_frames = mean_map.shape[0]
         for channel in channels:
             stem = f"{kind}_ch{channel:03d}"
+            out_stem = run_dir / stem
             formula = f"{KIND_TITLES[kind]}  |  channel {channel}"
-            frame_dir = run_dir / "frames" / stem
-            render_frames(
-                mean_map[:, channel],
-                frame_dir,
-                run_name=run_name,
-                formula=formula,
-                kind=kind,
-            )
-            if mean_map.shape[0] <= GRID_MAX_FRAMES:
+            grid_path = run_dir / f"{stem}_grid.png"
+            need_grid = n_frames <= GRID_MAX_FRAMES and should_write(grid_path)
+            if video_products_ready(out_stem, n_frames):
+                print(f"  skip existing {stem}")
+            else:
+                frame_dir = run_dir / "frames" / stem
+                render_frames(
+                    mean_map[:, channel],
+                    frame_dir,
+                    run_name=run_name,
+                    formula=formula,
+                    kind=kind,
+                )
+                written = write_video(frame_dir, out_stem, fps=fps, n_frames=n_frames)
+                print(f"  {stem}: {[p.name for p in written.values()]}")
+            if need_grid:
                 save_grid(
                     mean_map[:, channel],
-                    run_dir / f"{stem}_grid.png",
+                    grid_path,
                     title=f"{run_name}\n{formula}",
                     kind=kind,
                 )
-            written = write_video(frame_dir, run_dir / stem, fps=fps, n_frames=mean_map.shape[0])
-            print(f"  {stem}: {[p.name for p in written.values()]}")
 
     for kind in map_kinds:
         maps = map_tensor(res, kind)
+        n_frames = maps.shape[0]
+        out_stem = run_dir / kind
         formula = KIND_TITLES[kind]
-        frame_dir = run_dir / "frames" / kind
-        render_frames(maps, frame_dir, run_name=run_name, formula=formula, kind=kind)
-        if maps.shape[0] <= GRID_MAX_FRAMES:
-            save_grid(maps, run_dir / f"{kind}_grid.png", title=f"{run_name}\n{formula}", kind=kind)
-        written = write_video(frame_dir, run_dir / kind, fps=fps, n_frames=maps.shape[0])
-        print(f"  {kind}: {[p.name for p in written.values()]}")
+        grid_path = run_dir / f"{kind}_grid.png"
+        need_grid = n_frames <= GRID_MAX_FRAMES and should_write(grid_path)
+        if video_products_ready(out_stem, n_frames):
+            print(f"  skip existing {kind}")
+        else:
+            frame_dir = run_dir / "frames" / kind
+            render_frames(maps, frame_dir, run_name=run_name, formula=formula, kind=kind)
+            written = write_video(frame_dir, out_stem, fps=fps, n_frames=n_frames)
+            print(f"  {kind}: {[p.name for p in written.values()]}")
+        if need_grid:
+            save_grid(maps, grid_path, title=f"{run_name}\n{formula}", kind=kind)
 
     for kind in scatter_kinds:
+        out_stem = run_dir / kind
+        n_frames = res["mean_x"].shape[0]
+        if video_products_ready(out_stem, n_frames):
+            print(f"  skip existing {kind}")
+            continue
         if kind == "scatter_ch_x":
             written = scatter_vs_channel_animation(
                 res["mean_x"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 ylabel="x_d",
                 fps=fps,
             )
@@ -2175,7 +2400,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 res["mean_h"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
                 fps=fps,
             )
@@ -2185,7 +2410,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 res["mean_h"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 xlabel="x_d",
                 ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
                 fps=fps,
@@ -2195,7 +2420,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 res["mean_x"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
                 fps=fps,
             )
@@ -2204,7 +2429,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 res["mean_h"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
                 fps=fps,
             )
@@ -2214,12 +2439,14 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
                 res["mean_h"],
                 title=f"{run_name} | {KIND_TITLES[kind]}",
                 frame_dir=run_dir / "frames" / kind,
-                out_stem=run_dir / kind,
+                out_stem=out_stem,
                 xlabel=r"$\mathrm{mean}_{H,W}(x_d)$",
                 ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
                 fps=fps,
             )
         print(f"  {kind}: {[p.name for p in written.values()]}")
+        plt.close("all")
+        gc.collect()
 
 
 def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dict:
@@ -2252,122 +2479,194 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     save_inputs(spec, dataset, class_names, run_dir)
 
     method = spec.get("method")
-    if BACKBONE == "shared":
-        D = int(spec["D"])
-        step = spec.get("euler_step")
-        if step is None:
-            step = model.stage3_length / D
-        field_blocks = [model.deltifiedStage3[0]] * D
-        blocks: list[int] | None = None
-        wi = "plain"
-        model_key = "shared_convnext"
-        overlay_label = f"D={D}"
-        enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
+    cached = load_cached_run(run_dir, spec)
+    if cached is not None:
+        res = cached
+        model_key = res.get("model") or (
+            "shared_convnext" if BACKBONE == "shared" else spec.get("model")
+        )
+        blocks = res.get("blocks")
+        overlay_label = res.get("overlay_label") or name
+        res["name"] = name
+        res["spec"] = spec
+        res["model"] = model_key
+        res["overlay_label"] = overlay_label
         print(
-            f"shared D={D} euler_step={step:.4g} method={method or 'RK1'} "
-            f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
+            f"  loaded {MEAN_MAPS_NAME} (skip trajectory) "
+            f"D={res['D']} ES={res['euler_step']:g} method={res.get('method') or 'RK1'}"
         )
     else:
-        model_key = spec["model"]
-        n_blocks = stage3_n_blocks(model_key, model)
-        blocks = resolve_blocks(spec, n_blocks)
-        step = float(spec["euler_step"])
-        wi = spec.get("weight_interpolation", "plain")
-        field_blocks = stage3_field_blocks(
-            model_key,
-            model,
-            blocks,
+        if BACKBONE == "shared":
+            D = int(spec["D"])
+            step = spec.get("euler_step")
+            if step is None:
+                step = model.stage3_length / D
+            field_blocks = [model.deltifiedStage3[0]] * D
+            blocks = None
+            wi = "plain"
+            model_key = "shared_convnext"
+            overlay_label = f"D={D}"
+            enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
+            print(
+                f"shared D={D} euler_step={step:.4g} method={method or 'RK1'} "
+                f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
+            )
+        else:
+            model_key = spec["model"]
+            n_blocks = stage3_n_blocks(model_key, model)
+            blocks = resolve_blocks(spec, n_blocks)
+            step = float(spec["euler_step"])
+            wi = spec.get("weight_interpolation", "plain")
+            field_blocks = stage3_field_blocks(
+                model_key,
+                model,
+                blocks,
+                euler_step=step,
+                weight_interpolation=wi,
+            )
+            D = len(field_blocks)
+            overlay_label = name
+            enter_fn = lambda batch, m=model, k=model_key: enter_stage3(k, m, batch)
+            print(
+                f"{model_key} schedule={blocks} (D={D}) euler_step={step:.4g} "
+                f"method={method or 'RK1'} weight_interpolation={wi} "
+                f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
+            )
+
+        res = trajectory_stats(
+            enter_fn,
+            field_blocks,
+            spec["image_indices"],
             euler_step=step,
-            weight_interpolation=wi,
+            method=method,
+            batch_size=spec["batch_size"],
+            dataset=dataset,
         )
-        D = len(field_blocks)
-        overlay_label = name
-        enter_fn = lambda batch, m=model, k=model_key: enter_stage3(k, m, batch)
-        print(
-            f"{model_key} schedule={blocks} (D={D}) euler_step={step:.4g} "
-            f"method={method or 'RK1'} weight_interpolation={wi} "
-            f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
-        )
+        res["name"] = name
+        res["spec"] = spec
+        res["blocks"] = blocks
+        res["model"] = model_key
+        res["weight_interpolation"] = wi
+        res["overlay_label"] = overlay_label
 
-    res = trajectory_stats(
-        enter_fn,
-        field_blocks,
-        spec["image_indices"],
-        euler_step=step,
-        method=method,
-        batch_size=spec["batch_size"],
-        dataset=dataset,
-    )
-    res["name"] = name
-    res["spec"] = spec
-    res["blocks"] = blocks
-    res["model"] = model_key
-    res["weight_interpolation"] = wi
-    res["overlay_label"] = overlay_label
-
-    ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
-    if ignored:
-        print(f"ignored top-{spec['ignore_top_k_channels']} channels by ||h|| (WxH): {ignored}")
-
-    save_tables_and_config(res, class_names, run_dir)
-    save_metric_plots(res, run_dir)
+        ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
+        if ignored:
+            print(f"ignored top-{spec['ignore_top_k_channels']} channels by ||h|| (WxH): {ignored}")
 
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
     rank_kind = channel_kinds[0] if channel_kinds else "h"
-    channels = CHANNELS if CHANNELS is not None else most_active_channels(res[f"mean_{rank_kind}"], N_AUTO_CHANNELS)
+    if CHANNELS is not None:
+        channels = list(CHANNELS)
+    elif res.get("resolved_channels"):
+        channels = [int(c) for c in res["resolved_channels"]]
+    else:
+        channels = most_active_channels(res[f"mean_{rank_kind}"], N_AUTO_CHANNELS)
+    res["resolved_channels"] = channels
     print(f"channels={channels}")
+
+    save_tables_and_config(res, class_names, run_dir)
+    save_metric_plots(res, run_dir)
     write_videos(res, channels, run_dir)
 
     # Static overlays (always). Animations are gated by VIDEO_MAPS via write_videos.
-    scatter_vs_channel(
-        res["mean_x"],
-        title=f"{name} | {KIND_TITLES['scatter_ch_x']}",
-        path=run_dir / "scatter_ch_x.png",
-        ylabel="x_d",
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_ch_x.png",
+        lambda: scatter_vs_channel(
+            res["mean_x"],
+            title=f"{name} | {KIND_TITLES['scatter_ch_x']}",
+            path=run_dir / "scatter_ch_x.png",
+            ylabel="x_d",
+            channel=SCATTER_CHANNEL,
+        ),
     )
-    scatter_vs_channel(
-        res["mean_h"],
-        title=f"{name} | {KIND_TITLES['scatter_ch_h']}",
-        path=run_dir / "scatter_ch_h.png",
-        ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_ch_h.png",
+        lambda: scatter_vs_channel(
+            res["mean_h"],
+            title=f"{name} | {KIND_TITLES['scatter_ch_h']}",
+            path=run_dir / "scatter_ch_h.png",
+            ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
+            channel=SCATTER_CHANNEL,
+        ),
     )
-    scatter_residual_field(res, path=run_dir / "scatter_h.png", channel=SCATTER_CHANNEL)
-    scatter_vs_channel_means(
-        res["mean_x"],
-        title=f"{name} | {KIND_TITLES['scatter_ch_x_means']}",
-        path=run_dir / "scatter_ch_x_means.png",
-        ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_h.png",
+        lambda: scatter_residual_field(res, path=run_dir / "scatter_h.png", channel=SCATTER_CHANNEL),
     )
-    scatter_vs_channel_means(
-        res["mean_h"],
-        title=f"{name} | {KIND_TITLES['scatter_ch_h_means']}",
-        path=run_dir / "scatter_ch_h_means.png",
-        ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_ch_x_means.png",
+        lambda: scatter_vs_channel_means(
+            res["mean_x"],
+            title=f"{name} | {KIND_TITLES['scatter_ch_x_means']}",
+            path=run_dir / "scatter_ch_x_means.png",
+            ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+            channel=SCATTER_CHANNEL,
+        ),
     )
-    scatter_residual_field_means(res, path=run_dir / "scatter_h_means.png", channel=SCATTER_CHANNEL)
-    spaghetti_trajectories(
-        res["mean_x"],
-        title=f"{name} | spaghetti x_d(t)",
-        path=run_dir / "spaghetti_x.png",
-        ylabel="x_d",
-        euler_step=res["euler_step"],
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_ch_h_means.png",
+        lambda: scatter_vs_channel_means(
+            res["mean_h"],
+            title=f"{name} | {KIND_TITLES['scatter_ch_h_means']}",
+            path=run_dir / "scatter_ch_h_means.png",
+            ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+            channel=SCATTER_CHANNEL,
+        ),
     )
-    spaghetti_trajectories(
-        res["mean_h"],
-        title=f"{name} | spaghetti h_d(t)",
-        path=run_dir / "spaghetti_h.png",
-        ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
-        euler_step=res["euler_step"],
-        channel=SCATTER_CHANNEL,
+    write_static(
+        run_dir / "scatter_h_means.png",
+        lambda: scatter_residual_field_means(
+            res, path=run_dir / "scatter_h_means.png", channel=SCATTER_CHANNEL
+        ),
+    )
+    write_static(
+        run_dir / "spaghetti_x.png",
+        lambda: spaghetti_trajectories(
+            res["mean_x"],
+            title=f"{name} | spaghetti x_d(t)",
+            path=run_dir / "spaghetti_x.png",
+            ylabel="x_d",
+            euler_step=res["euler_step"],
+            channel=SCATTER_CHANNEL,
+        ),
+    )
+    write_static(
+        run_dir / "spaghetti_h.png",
+        lambda: spaghetti_trajectories(
+            res["mean_h"],
+            title=f"{name} | spaghetti h_d(t)",
+            path=run_dir / "spaghetti_h.png",
+            ylabel=r"$h_d\ (=\Delta x_d/\mathrm{ES})$",
+            euler_step=res["euler_step"],
+            channel=SCATTER_CHANNEL,
+        ),
+    )
+    write_static(
+        run_dir / "spaghetti_x_means.png",
+        lambda: spaghetti_trajectories_means(
+            res["mean_x"],
+            title=f"{name} | spaghetti mean(x_d)(t)",
+            path=run_dir / "spaghetti_x_means.png",
+            ylabel=r"$\mathrm{mean}_{H,W}(x_d)$",
+            euler_step=res["euler_step"],
+            channel=SCATTER_CHANNEL,
+        ),
+    )
+    write_static(
+        run_dir / "spaghetti_h_means.png",
+        lambda: spaghetti_trajectories_means(
+            res["mean_h"],
+            title=f"{name} | spaghetti mean(h_d)(t)",
+            path=run_dir / "spaghetti_h_means.png",
+            ylabel=r"$\mathrm{mean}_{H,W}(h_d)$",
+            euler_step=res["euler_step"],
+            channel=SCATTER_CHANNEL,
+        ),
     )
     print(f"done -> {run_dir}")
 
-    # Drop heavy maps before returning a light copy for overlay.
+    # Do NOT keep mean_x/mean_h in memory across runs (~800MB each for ResNet R100).
+    # Overlay reloads from mean_maps.pt on disk.
     light = {
         "name": res["name"],
         "model": model_key,
@@ -2375,9 +2674,9 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
         "blocks": blocks,
         "overlay_label": overlay_label,
         "euler_step": res["euler_step"],
-        "mean_x": res["mean_x"],
-        "mean_h": res["mean_h"],
         "n_images": res["n_images"],
+        "run_dir": str(run_dir),
+        "map_shape": tuple(res["mean_x"].shape[1:]),
     }
     del res
     gc.collect()
@@ -2386,21 +2685,46 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     return light
 
 
+def load_overlay_maps(meta: dict) -> dict:
+    """Reload mean_x/mean_h from disk for SCATTER_OVERLAY_BY_D."""
+    pt = Path(meta["run_dir"]) / MEAN_MAPS_NAME
+    try:
+        maps = torch.load(pt, map_location="cpu", weights_only=True)
+    except TypeError:
+        maps = torch.load(pt, map_location="cpu")
+    out = dict(meta)
+    out["mean_x"] = maps["mean_x"]
+    out["mean_h"] = maps["mean_h"]
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--list-only", action="store_true", help="Print resolved RUNS and exit")
     p.add_argument("--only", nargs="+", default=None, help="Only these run names")
-    p.add_argument("--skip-existing", action="store_true", help="Skip runs that already have config.json")
+    p.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip runs that already have config.json (coarse; per-figure skip is on by default)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing figures and recompute trajectories (ignore mean_maps.pt cache)",
+    )
     p.add_argument("--keep-frames", action="store_true", help="Keep PNG frame directories")
     return p.parse_args()
 
 
 def main() -> None:
-    global KEEP_FRAMES
+    global KEEP_FRAMES, FORCE_RECOMPUTE
     load_dotenv(_REPO_ROOT / ".env")
     args = parse_args()
     if args.keep_frames:
         KEEP_FRAMES = True
+    if args.force:
+        FORCE_RECOMPUTE = True
+        print("FORCE_RECOMPUTE: overwriting existing figures / ignoring trajectory cache")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"device={device}  backbone={BACKBONE}  out={OUT_DIR}")
@@ -2471,20 +2795,35 @@ def main() -> None:
     if SCATTER_OVERLAY_BY_D and completed:
         by_key: dict[tuple, list[dict]] = {}
         for res in completed:
-            key = (res.get("model"), tuple(res["mean_x"].shape[1:]), res["n_images"])
+            key = (res.get("model"), tuple(res.get("map_shape") or ()), res["n_images"])
             by_key.setdefault(key, []).append(res)
-        for group in by_key.values():
-            if len(group) < 2:
+        for group_meta in by_key.values():
+            if len(group_meta) < 2:
                 continue
-            group = sorted(group, key=lambda r: (r["D"], r["name"]))
-            tag = "-".join(r.get("overlay_label", str(r["D"])) for r in group)
+            group_meta = sorted(group_meta, key=lambda r: (r["D"], r["name"]))
+            tag = "-".join(r.get("overlay_label", str(r["D"])) for r in group_meta)
             tag = tag.replace(" ", "_").replace("/", "div")[:120]
-            out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
-            scatter_overlay_by_d(group, path=out, channel=SCATTER_CHANNEL)
-            print(f"overlay scatter -> {out}")
-            out_means = OUT_DIR / f"scatter_h_means_overlay_{tag}.png"
-            scatter_overlay_means_by_d(group, path=out_means, channel=SCATTER_CHANNEL)
-            print(f"overlay scatter means -> {out_means}")
+            group = [load_overlay_maps(m) for m in group_meta]
+            try:
+                out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
+                write_static(
+                    out,
+                    lambda g=group, p=out: scatter_overlay_by_d(g, path=p, channel=SCATTER_CHANNEL),
+                )
+                if _exists_nonempty(out):
+                    print(f"overlay scatter -> {out}")
+                out_means = OUT_DIR / f"scatter_h_means_overlay_{tag}.png"
+                write_static(
+                    out_means,
+                    lambda g=group, p=out_means: scatter_overlay_means_by_d(
+                        g, path=p, channel=SCATTER_CHANNEL
+                    ),
+                )
+                if _exists_nonempty(out_means):
+                    print(f"overlay scatter means -> {out_means}")
+            finally:
+                del group
+                gc.collect()
 
 
 if __name__ == "__main__":
