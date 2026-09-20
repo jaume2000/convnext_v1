@@ -47,7 +47,11 @@ def _lerp_params(
     block_b: nn.Module,
     alpha: float,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Linearly interpolate parameters (and buffers) of two identically structured blocks."""
+    """Linearly interpolate parameters (and float buffers) of two identical blocks.
+
+    Non-floating buffers (e.g. Swin ``relative_position_index``) are taken from
+    ``block_a`` unchanged — they are discrete lookup tables, not lerpable.
+    """
     a = (1.0 - alpha)
     params = {
         name: a * pa + alpha * pb
@@ -56,13 +60,12 @@ def _lerp_params(
             block_b.named_parameters(),
         )
     }
-    buffers = {
-        name: a * ba + alpha * bb
-        for (name, ba), (_, bb) in zip(
-            block_a.named_buffers(),
-            block_b.named_buffers(),
-        )
-    }
+    buffers: dict[str, torch.Tensor] = {}
+    for (name, ba), (_, bb) in zip(block_a.named_buffers(), block_b.named_buffers()):
+        if ba.is_floating_point() and bb.is_floating_point():
+            buffers[name] = a * ba + alpha * bb
+        else:
+            buffers[name] = ba
     return params, buffers
 
 

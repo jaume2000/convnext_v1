@@ -5,8 +5,9 @@ Shared mode (``BACKBONE = "shared"``): integrates one shared residual ``D`` time
 
 Interpoled mode (``BACKBONE = "interpoled"``): walks a stage-3 ``blocks`` /
 ``repeats`` schedule on any of ``convnext``, ``resnet50``, ``resnet101``, ``swin``
-(set via ``INTERPOLED_MODELS`` / per-run ``model``). Swin NHWC is wrapped to NCHW
-for the same analysis/plots as ConvNeXt/ResNet.
+(set via ``INTERPOLED_MODELS`` / per-run ``model``). Weight schedule is ``plain``
+(θ=θ_⌊t⌋) or ``bilinear`` (θ=(1-α)θ_k+αθ_{k+1}), matching the interpolation
+scripts. Swin NHWC is wrapped to NCHW for the same analysis/plots as ConvNeXt/ResNet.
 
 Submit (interpoled, ``BACKBONE = "interpoled"``):
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
@@ -17,6 +18,7 @@ Or locally:
   python scripts/feature_map_explorer.py
   python scripts/feature_map_explorer.py --list-only
   python scripts/feature_map_explorer.py --only resnet50_baseline_R1_ES1_c289_n1
+  python scripts/feature_map_explorer.py --only convnext_R100_ES0.01_bilinear_c289_n1
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from models.backbones.delta_convnext import DeltaConvNext
 from models.backbones.interpoled_convnext import InterpoledConvNextV1
 from models.backbones.interpoled_resnet import InterpoledResNet50, InterpoledResNet101
 from models.backbones.interpoled_swin import InterpoledSwinT
+from models.backbones.rk_integrate import bilinear_time_steps, call_lerped
 from utils.env import load_dotenv
 
 # --------------------------------------------------------------------------- config
@@ -103,7 +106,8 @@ RUNS_SHARED: list[dict] = [
     {"name": "shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_FM_COMMON},
 ]
 
-# Interpoled: core schedules × each model, then ConvNeXt RK4 probes.
+# Interpoled: core schedules × each model (plain θ), then bilinear θ probes,
+# then ConvNeXt RK4 probes.
 _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("baseline_R1_ES1_c289_n1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0}),
     ("baseline_R1_ES1_c289_n1_ignore1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1}),
@@ -113,6 +117,17 @@ _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("R100_ES0.1_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1}),
     ("R100_ES1_c289_n1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0}),
     ("R100_ES1_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
+]
+# Bilinear weight interpolation (θ=(1-α)θ_k+αθ_{k+1}), same grids as the
+# interpolation scripts. Models: convnext / swin / resnet50 / resnet101.
+_FM_BILINEAR_MODELS = ("convnext", "convnext_droppath0", "resnet50", "resnet101", "swin")
+_FM_BILINEAR_SPECS: list[tuple[str, dict]] = [
+    ("R100_ES0.01_bilinear_c289_n1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES0.01_bilinear_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1}),
+    ("R100_ES0.1_bilinear_c289_n1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES0.1_bilinear_c289_n1_ignore1", {"repeats": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1}),
+    ("R100_ES1_bilinear_c289_n1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0}),
+    ("R100_ES1_bilinear_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
 ]
 INTERPOLED_EXPERIMENTS: list[dict] = [
     {
@@ -126,11 +141,24 @@ INTERPOLED_EXPERIMENTS: list[dict] = [
     for model in INTERPOLED_MODELS
     for suffix, kw in _FM_INTERP_SPECS
 ]
-# RK4 probe: R100 ES=0.01 on both ConvNeXt checkpoints (± ignore).
 INTERPOLED_EXPERIMENTS += [
     {
         "model": model,
-        "name": f"{model}_R100_ES0.01_RK4_c289_n1{sfx}",
+        "name": f"{model}_{suffix}",
+        "class_id": 289,
+        "max_images": 1,
+        "batch_size": 1,
+        "weight_interpolation": "bilinear",
+        **kw,
+    }
+    for model in _FM_BILINEAR_MODELS
+    for suffix, kw in _FM_BILINEAR_SPECS
+]
+# RK4 probe: R100 ES=0.01 on both ConvNeXt checkpoints (± ignore), plain + bilinear.
+INTERPOLED_EXPERIMENTS += [
+    {
+        "model": model,
+        "name": f"{model}_R100_ES0.01_RK4{wi_sfx}_c289_n1{ign_sfx}",
         "repeats": 100,
         "euler_step": 0.01,
         "method": "RK4",
@@ -139,9 +167,11 @@ INTERPOLED_EXPERIMENTS += [
         "batch_size": 1,
         "fps": 80,
         "ignore_top_k_channels": ign,
+        **({"weight_interpolation": "bilinear"} if wi == "bilinear" else {}),
     }
     for model in ("convnext", "convnext_droppath0")
-    for sfx, ign in (("", 0), ("_ignore1", 1))
+    for wi, wi_sfx in (("plain", ""), ("bilinear", "_bilinear"))
+    for ign_sfx, ign in (("", 0), ("_ignore1", 1))
 ]
 
 INTERPOLED_MODEL_KEYS = (
@@ -259,6 +289,7 @@ def run_folder_name(spec: dict) -> str:
     if spec.get("name"):
         return spec["name"]
     method = (spec.get("method") or "RK1").lower()
+    wi = spec.get("weight_interpolation", "plain")
     if "D" in spec:
         parts = [f"D{spec['D']}_{method}"]
     elif "repeats" in spec:
@@ -267,6 +298,8 @@ def run_folder_name(spec: dict) -> str:
         parts = [f"B{'-'.join(map(str, spec['blocks']))}_ES{spec['euler_step']:g}"]
     else:
         raise ValueError("run needs name, or D / blocks / repeats")
+    if wi != "plain":
+        parts.append(wi)
     class_id = spec.get("class_id", CLASS_ID)
     max_images = spec.get("max_images", MAX_IMAGES_PER_CLASS)
     batch_size = spec.get("batch_size", BATCH_SIZE)
@@ -362,6 +395,38 @@ class _NHWCBlockAsNCHW(nn.Module):
         return y.permute(0, 3, 1, 2).contiguous()
 
 
+class _LerpedBlock(nn.Module):
+    """Residual module with bilinear weights: θ = (1-α)θ_a + α θ_b."""
+
+    def __init__(self, block_a: nn.Module, block_b: nn.Module, alpha: float):
+        super().__init__()
+        self.block_a = block_a
+        self.block_b = block_b
+        self.alpha = float(alpha)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return call_lerped(self.block_a, self.block_b, self.alpha, x)
+
+
+class _LerpedNHWCAsNCHW(nn.Module):
+    """Lerped NHWC residual with NCHW tensors (permute in/out)."""
+
+    def __init__(self, block_a: nn.Module, block_b: nn.Module, alpha: float):
+        super().__init__()
+        self.block_a = block_a
+        self.block_b = block_b
+        self.alpha = float(alpha)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = call_lerped(
+            self.block_a,
+            self.block_b,
+            self.alpha,
+            x.permute(0, 2, 3, 1).contiguous(),
+        )
+        return y.permute(0, 3, 1, 2).contiguous()
+
+
 def stage3_n_blocks(model_key: str, model: nn.Module) -> int:
     if model_key in _CONVNEXT_KEYS:
         return int(model.depths[2])
@@ -369,6 +434,19 @@ def stage3_n_blocks(model_key: str, model: nn.Module) -> int:
         return int(model.n_blocks)
     if model_key == "swin":
         return int(model.n_blocks)
+    raise ValueError(model_key)
+
+
+def stage3_raw_blocks(model_key: str, model: nn.Module) -> list[nn.Module]:
+    """Native stage-3 residual modules (indices 0..n_blocks-1), NHWC for Swin."""
+    n = stage3_n_blocks(model_key, model)
+    if model_key in _CONVNEXT_KEYS:
+        return [model.stage3[i] for i in range(n)]
+    if model_key in ("resnet50", "resnet101"):
+        return [model.backbone.layer3[i + 1] for i in range(n)]
+    if model_key == "swin":
+        stage3 = model.backbone.features[InterpoledSwinT.STAGE3_INDEX]
+        return [stage3[i] for i in range(n)]
     raise ValueError(model_key)
 
 
@@ -394,16 +472,51 @@ def enter_stage3(model_key: str, model: nn.Module, batch: torch.Tensor) -> torch
     raise ValueError(model_key)
 
 
-def stage3_field_blocks(model_key: str, model: nn.Module, blocks: list[int]) -> list[nn.Module]:
-    """Modules whose forward is residual ``x + f(x)``; used as ``h = block(x) - x``."""
-    if model_key in _CONVNEXT_KEYS:
-        return [model.stage3[i] for i in blocks]
-    if model_key in ("resnet50", "resnet101"):
-        return [model.backbone.layer3[i + 1] for i in blocks]
+def _wrap_stage3_block(model_key: str, block: nn.Module) -> nn.Module:
     if model_key == "swin":
-        stage3 = model.backbone.features[InterpoledSwinT.STAGE3_INDEX]
-        return [_NHWCBlockAsNCHW(stage3[i]) for i in blocks]
-    raise ValueError(model_key)
+        return _NHWCBlockAsNCHW(block)
+    return block
+
+
+def _wrap_lerped_stage3(
+    model_key: str, block_a: nn.Module, block_b: nn.Module, alpha: float
+) -> nn.Module:
+    if model_key == "swin":
+        return _LerpedNHWCAsNCHW(block_a, block_b, alpha)
+    return _LerpedBlock(block_a, block_b, alpha)
+
+
+def stage3_field_blocks(
+    model_key: str,
+    model: nn.Module,
+    blocks: list[int],
+    *,
+    euler_step: float = 1.0,
+    weight_interpolation: str = "plain",
+) -> list[nn.Module]:
+    """Modules whose forward is residual ``x + f(x)``; used as ``h = block(x) - x``.
+
+    ``plain``: one field per scheduled stage-3 index.
+    ``bilinear``: uniform Euler grid on [0, n_blocks) with ``len(blocks)`` steps,
+    θ(t)=(1-α)θ_k+αθ_{k+1} (same as the interpolation scripts; block *indices*
+    are ignored except for the step count).
+    """
+    if weight_interpolation not in ("plain", "bilinear"):
+        raise ValueError(
+            f"weight_interpolation must be 'plain' or 'bilinear', got {weight_interpolation!r}"
+        )
+    raw = stage3_raw_blocks(model_key, model)
+    n_blocks = len(raw)
+    if weight_interpolation == "plain":
+        return [_wrap_stage3_block(model_key, raw[i]) for i in blocks]
+
+    fields: list[nn.Module] = []
+    for k, alpha in bilinear_time_steps(n_blocks, len(blocks), euler_step):
+        if alpha == 0.0 or k >= n_blocks - 1:
+            fields.append(_wrap_stage3_block(model_key, raw[k]))
+        else:
+            fields.append(_wrap_lerped_stage3(model_key, raw[k], raw[k + 1], alpha))
+    return fields
 
 
 def denormalize(img: torch.Tensor) -> torch.Tensor:
@@ -1213,6 +1326,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "blocks": list(res.get("blocks") or []),
         "euler_step": res["euler_step"],
         "method": res["method"] or "RK1",
+        "weight_interpolation": res.get("weight_interpolation", "plain"),
         "split": SPLIT,
         "class_id": spec["class_id"],
         "class_name": class_names[spec["class_id"]] if spec["class_id"] is not None else None,
@@ -2115,6 +2229,7 @@ def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dic
     out["batch_size"] = out.get("batch_size", BATCH_SIZE)
     out["fps"] = out.get("fps", FPS)
     out["ignore_top_k_channels"] = out.get("ignore_top_k_channels", IGNORE_TOP_K_CHANNELS)
+    out["weight_interpolation"] = out.get("weight_interpolation", "plain")
     if out.get("image_indices") is None:
         if out["class_id"] is not None:
             cid = out["class_id"]
@@ -2144,6 +2259,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             step = model.stage3_length / D
         field_blocks = [model.deltifiedStage3[0]] * D
         blocks: list[int] | None = None
+        wi = "plain"
         model_key = "shared_convnext"
         overlay_label = f"D={D}"
         enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
@@ -2156,13 +2272,21 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
         n_blocks = stage3_n_blocks(model_key, model)
         blocks = resolve_blocks(spec, n_blocks)
         step = float(spec["euler_step"])
-        field_blocks = stage3_field_blocks(model_key, model, blocks)
-        D = len(blocks)
+        wi = spec.get("weight_interpolation", "plain")
+        field_blocks = stage3_field_blocks(
+            model_key,
+            model,
+            blocks,
+            euler_step=step,
+            weight_interpolation=wi,
+        )
+        D = len(field_blocks)
         overlay_label = name
         enter_fn = lambda batch, m=model, k=model_key: enter_stage3(k, m, batch)
         print(
             f"{model_key} schedule={blocks} (D={D}) euler_step={step:.4g} "
-            f"method={method or 'RK1'} batch={spec['batch_size']} n={len(spec['image_indices'])}"
+            f"method={method or 'RK1'} weight_interpolation={wi} "
+            f"batch={spec['batch_size']} n={len(spec['image_indices'])}"
         )
 
     res = trajectory_stats(
@@ -2178,6 +2302,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     res["spec"] = spec
     res["blocks"] = blocks
     res["model"] = model_key
+    res["weight_interpolation"] = wi
     res["overlay_label"] = overlay_label
 
     ignored = apply_ignore_top_k_channels(res, spec["ignore_top_k_channels"])
@@ -2312,6 +2437,7 @@ def main() -> None:
                 sched = f"blocks={spec['blocks']} ES={spec['euler_step']:g}"
         print(
             f"  {spec['name']}: model={model_s}, {who}, {sched}, "
+            f"wi={spec.get('weight_interpolation', 'plain')}, "
             f"n={len(spec['image_indices'])}, bs={spec['batch_size']}, "
             f"fps={spec['fps']}, ignore_top_k={spec['ignore_top_k_channels']}"
         )

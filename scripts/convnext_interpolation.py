@@ -30,13 +30,13 @@ load_dotenv()
 CHECKPOINT = Path(
     os.environ.get(
         "CONVNEXT_CHECKPOINT",
-        str(_REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"),
+        str(_REPO_ROOT / "outputs" / "convnextv1_imagenet" / "weights" / "last.pth"),
     )
 )
 OUTPUT_PATH = Path(
     os.environ.get(
         "CONVNEXT_INTERP_OUT",
-        str(_REPO_ROOT / "outputs" / "convnext_interpolation_droppath0"),
+        str(_REPO_ROOT / "outputs" / "convnext_interpolation"),
     )
 )
 BATCH_SIZE = 128

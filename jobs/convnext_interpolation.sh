@@ -3,19 +3,18 @@
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/convnext_interpolation_%j.out
 #SBATCH --error=logs/convnext_interpolation_%j.err
 
-# Stage-3 residual RK schedule on ConvNeXt-T (droppath0 checkpoint by default).
+# Stage-3 residual RK schedule on ConvNeXt-T trained with drop-path
+# (outputs/convnextv1_imagenet). Never use the droppath0 checkpoint.
 # Experiment list: scripts/convnext_interpolation.py (EXPERIMENTS).
 #
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnext_interpolation.sh
-# Normal (with drop-path) weights:
-#   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnext_interpolation_normal.sh
 
 set -euo pipefail
 
@@ -74,9 +73,9 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-# droppath0 defaults (override via env for normal weights)
-export CONVNEXT_CHECKPOINT="${CONVNEXT_CHECKPOINT:-${PROJECT_ROOT}/outputs/convnextv1_imagenet_droppath0/weights/last.pth}"
-export CONVNEXT_INTERP_OUT="${CONVNEXT_INTERP_OUT:-${PROJECT_ROOT}/outputs/convnext_interpolation_droppath0}"
+# Drop-path trained ConvNeXt (never droppath0)
+export CONVNEXT_CHECKPOINT="${CONVNEXT_CHECKPOINT:-${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth}"
+export CONVNEXT_INTERP_OUT="${CONVNEXT_INTERP_OUT:-${PROJECT_ROOT}/outputs/convnext_interpolation}"
 
 DATASET_DIR="ILSVRC___imagenet-1k"
 if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
