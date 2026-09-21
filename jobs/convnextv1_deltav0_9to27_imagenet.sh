@@ -3,9 +3,9 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# Booster nodes are 32 cores (1x Xeon 8358) / 4 GPUs, so the 4 ranks get 8 dataloader
-# workers each (see available_cpus() in the train script); fewer just idles cores.
-#SBATCH --cpus-per-task=32
+# Booster nodes are 32 cores / 4 GPUs; request 16 so each of 4 ranks gets ~4
+# dataloader workers (see available_cpus() in the train script).
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
