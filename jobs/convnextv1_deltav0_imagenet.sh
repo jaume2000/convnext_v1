@@ -6,7 +6,7 @@
 # Booster nodes are 32 cores / 4 GPUs; request 16 so each of 4 ranks gets ~4
 # dataloader workers (see available_cpus() in the train script).
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/convnextv1_deltav0_imagenet_%j.out

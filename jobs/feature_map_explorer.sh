@@ -13,16 +13,16 @@
 
 # Stage-3 feature-map trajectories. Config lives in
 # scripts/feature_map_explorer.py:
-#   BACKBONE = "shared" | "interpoled"
-#   INTERPOLED_MODELS = ["convnext", "resnet50", "resnet101", "swin"]
-#   INTERPOLED_EXPERIMENTS = [...]  # includes plain + bilinear weight schedules
+#   BACKBONE = "interpoled"  # also runs convnext_shared + swin/resnet/convnext
+#   INTERPOLED_MODELS = ["convnext_shared", "swin", "resnet50", ...]
+#   RUNS_SHARED / INTERPOLED_EXPERIMENTS
 #
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 #
 # Optional overrides:
 #   TRAIN_ARGS='--list-only'
-#   TRAIN_ARGS='--only resnet50_baseline_R1_ES1_c289_n1 swin_R100_ES0.01_bilinear_c289_n1'
+#   TRAIN_ARGS='--only convnext_shared_baseline_D9_ES1_c289_n1 swin_R100_ES0.01_bilinear_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
 #   TRAIN_ARGS='--keep-frames'
 

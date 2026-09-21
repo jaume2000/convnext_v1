@@ -1,24 +1,20 @@
 """Stage-3 feature-map trajectories for shared ConvNeXt or interpoled backbones.
 
-Shared mode (``BACKBONE = "shared"``): integrates one shared residual ``D`` times
-(DeltaConvNext checkpoint).
+Default (``BACKBONE = "interpoled"``): one job sweeps ``convnext_shared`` (DeltaConvNext
+shared residual × D) plus interpoled stage-3 schedules on ``swin`` / ``resnet*`` /
+``convnext*``. Weight schedule is ``plain`` (θ=θ_⌊t⌋) or ``bilinear``
+(θ=(1-α)θ_k+αθ_{k+1}). Swin NHWC is wrapped to NCHW for the same analysis/plots.
 
-Interpoled mode (``BACKBONE = "interpoled"``): walks a stage-3 ``blocks`` /
-``repeats`` schedule on any of ``convnext``, ``resnet50``, ``resnet101``, ``swin``
-(set via ``INTERPOLED_MODELS`` / per-run ``model``). Weight schedule is ``plain``
-(θ=θ_⌊t⌋) or ``bilinear`` (θ=(1-α)θ_k+αθ_{k+1}), matching the interpolation
-scripts. Swin NHWC is wrapped to NCHW for the same analysis/plots as ConvNeXt/ResNet.
+``BACKBONE = "shared"`` keeps the old shared-only sweep.
 
-Submit (interpoled, ``BACKBONE = "interpoled"``):
+Submit:
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
-
-Shared ConvNeXt maps: set ``BACKBONE = "shared"`` then submit the same job again.
 
 Or locally:
   python scripts/feature_map_explorer.py
   python scripts/feature_map_explorer.py --list-only
   python scripts/feature_map_explorer.py --only resnet50_baseline_R1_ES1_c289_n1
-  python scripts/feature_map_explorer.py --only convnext_R100_ES0.01_bilinear_c289_n1
+  python scripts/feature_map_explorer.py --only convnext_shared_baseline_D9_ES1_c289_n1
   python scripts/feature_map_explorer.py --force   # overwrite existing figures / recompute
 """
 
@@ -59,12 +55,13 @@ from models.backbones.rk_integrate import bilinear_time_steps, call_lerped
 from utils.env import load_dotenv
 
 # --------------------------------------------------------------------------- config
-# "shared" = DeltaConvNext shared residual × D
-# "interpoled" = distinct stage-3 blocks on convnext / resnet50 / resnet101 / swin
+# "shared" = only DeltaConvNext shared residual × D
+# "interpoled" = convnext_shared + interpoled stage-3 models (swin / resnet / convnext)
 BACKBONE = "interpoled"  # "shared" | "interpoled"
 
-# Interpoled networks for feature-map sweeps.
+# Models included when BACKBONE == "interpoled" (docs / startup log).
 INTERPOLED_MODELS = [
+    "convnext_shared",    # outputs/shared_convnextv1_imagenet (shared residual × D)
     "convnext",           # outputs/convnextv1_imagenet (with drop-path)
     "convnext_droppath0", # outputs/convnextv1_imagenet_droppath0
     "resnet50",
@@ -91,20 +88,21 @@ FPS = 10.0
 
 # Shared ConvNeXt feature maps (same last.pth as shared_convnext_ablation).
 _FM_COMMON = {"class_id": 289, "max_images": 1, "batch_size": 1}
+_SHARED = {"model": "convnext_shared", **_FM_COMMON}
 RUNS_SHARED: list[dict] = [
     # Baseline D=9 ES=1 ± ignore (Euler).
-    {"name": "shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
-    {"name": "shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    {"name": "convnext_shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, "method": None, **_SHARED},
+    {"name": "convnext_shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, "method": None, **_SHARED},
     # R100-style refined / large-step Euler.
-    {"name": "shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
-    {"name": "shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
-    {"name": "shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
-    {"name": "shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
-    {"name": "shared_D100_ES1_c289_n1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_FM_COMMON},
-    {"name": "shared_D100_ES1_c289_n1_ignore1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_FM_COMMON},
+    {"name": "convnext_shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES1_c289_n1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES1_c289_n1_ignore1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
     # RK4 probe at refined step (vs Euler D100 ES=0.01).
-    {"name": "shared_D100_ES0.01_RK4_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": "RK4", **_FM_COMMON},
-    {"name": "shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_FM_COMMON},
+    {"name": "convnext_shared_D100_ES0.01_RK4_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": "RK4", **_SHARED},
+    {"name": "convnext_shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_SHARED},
 ]
 
 # Interpoled: bilinear θ first (swin → … → convnext), then RK4 probes,
@@ -178,6 +176,7 @@ INTERPOLED_EXPERIMENTS += [
 ]
 
 INTERPOLED_MODEL_KEYS = (
+    "convnext_shared",
     "convnext",
     "convnext_droppath0",
     "resnet50",
@@ -185,6 +184,33 @@ INTERPOLED_MODEL_KEYS = (
     "swin",
 )
 _CONVNEXT_KEYS = ("convnext", "convnext_droppath0")
+_SHARED_MODEL_KEY = "convnext_shared"
+
+
+def is_shared_run(spec: dict) -> bool:
+    return spec.get("model") == _SHARED_MODEL_KEY or BACKBONE == "shared"
+
+
+def out_dir_for(spec: dict) -> Path:
+    """Shared residual runs stay under featureMaps/; interpoled under featureMaps_interpoled/."""
+    if is_shared_run(spec):
+        return OUT_DIR_SHARED
+    return OUT_DIR_INTERPOLED
+
+
+def build_shared_runs(experiments: list[dict]) -> list[dict]:
+    """Tag shared-residual runs with ``model=convnext_shared``."""
+    runs: list[dict] = []
+    for exp in experiments:
+        run = dict(exp)
+        run["model"] = _SHARED_MODEL_KEY
+        base = run.get("name") or "run"
+        if not base.startswith(f"{_SHARED_MODEL_KEY}_"):
+            if base.startswith("shared_"):
+                base = base[len("shared_") :]
+            run["name"] = f"{_SHARED_MODEL_KEY}_{base}"
+        runs.append(run)
+    return runs
 
 
 def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
@@ -192,6 +218,8 @@ def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
     runs: list[dict] = []
     for exp in experiments:
         model = exp.get("model")
+        if model == _SHARED_MODEL_KEY:
+            raise ValueError("Use RUNS_SHARED / build_shared_runs for convnext_shared")
         if model not in INTERPOLED_MODEL_KEYS:
             raise ValueError(f"Unknown interpoled model {model!r}; expected one of {INTERPOLED_MODEL_KEYS}")
         run = dict(exp)
@@ -204,10 +232,11 @@ def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
 
 if BACKBONE == "shared":
     OUT_DIR = OUT_DIR_SHARED
-    RUNS = RUNS_SHARED
+    RUNS = build_shared_runs(RUNS_SHARED)
 elif BACKBONE == "interpoled":
     OUT_DIR = OUT_DIR_INTERPOLED
-    RUNS = build_interpoled_runs(INTERPOLED_EXPERIMENTS)
+    # Shared residual first, then bilinear / RK4 / plain interpoled sweeps.
+    RUNS = build_shared_runs(RUNS_SHARED) + build_interpoled_runs(INTERPOLED_EXPERIMENTS)
 else:
     raise ValueError(f"Unknown BACKBONE={BACKBONE!r}; use 'shared' or 'interpoled'")
 
@@ -429,6 +458,10 @@ def load_interpoled_convnext(checkpoint: Path) -> InterpoledConvNextV1:
 
 
 def load_interpoled_model(model_key: str) -> nn.Module:
+    if model_key == _SHARED_MODEL_KEY:
+        if not SHARED_CHECKPOINT.is_file():
+            raise FileNotFoundError(f"Shared ConvNeXt checkpoint not found: {SHARED_CHECKPOINT}")
+        return load_shared_convnext(SHARED_CHECKPOINT)
     if model_key == "convnext":
         if not INTERPOLED_CONVNEXT_CHECKPOINT.is_file():
             raise FileNotFoundError(f"ConvNeXt checkpoint not found: {INTERPOLED_CONVNEXT_CHECKPOINT}")
@@ -1417,7 +1450,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         res["scalars"].to_csv(run_dir / "table_scalars.csv", index=False)
     config = {
         "name": res["name"],
-        "backbone": BACKBONE,
+        "backbone": "shared" if is_shared_run(spec) else "interpoled",
         "model": res.get("model"),
         "D": res["D"],
         "blocks": list(res.get("blocks") or []),
@@ -2473,7 +2506,7 @@ def resolve_run(spec: dict, *, labels: list[int], class_names: list[str]) -> dic
 
 def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     name = spec["name"]
-    run_dir = OUT_DIR / name
+    run_dir = out_dir_for(spec) / name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n=== {name} ===")
     save_inputs(spec, dataset, class_names, run_dir)
@@ -2483,7 +2516,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
     if cached is not None:
         res = cached
         model_key = res.get("model") or (
-            "shared_convnext" if BACKBONE == "shared" else spec.get("model")
+            _SHARED_MODEL_KEY if is_shared_run(spec) else spec.get("model")
         )
         blocks = res.get("blocks")
         overlay_label = res.get("overlay_label") or name
@@ -2496,7 +2529,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             f"D={res['D']} ES={res['euler_step']:g} method={res.get('method') or 'RK1'}"
         )
     else:
-        if BACKBONE == "shared":
+        if is_shared_run(spec):
             D = int(spec["D"])
             step = spec.get("euler_step")
             if step is None:
@@ -2504,7 +2537,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             field_blocks = [model.deltifiedStage3[0]] * D
             blocks = None
             wi = "plain"
-            model_key = "shared_convnext"
+            model_key = _SHARED_MODEL_KEY
             overlay_label = f"D={D}"
             enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
             print(
@@ -2726,12 +2759,17 @@ def main() -> None:
         FORCE_RECOMPUTE = True
         print("FORCE_RECOMPUTE: overwriting existing figures / ignoring trajectory cache")
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"device={device}  backbone={BACKBONE}  out={OUT_DIR}")
+    OUT_DIR_SHARED.mkdir(parents=True, exist_ok=True)
+    OUT_DIR_INTERPOLED.mkdir(parents=True, exist_ok=True)
+    print(f"device={device}  backbone={BACKBONE}  out_shared={OUT_DIR_SHARED}")
+    print(f"  out_interpoled={OUT_DIR_INTERPOLED}")
     if BACKBONE == "interpoled":
-        print(f"interpoled models={INTERPOLED_MODELS}")
+        print(f"models={INTERPOLED_MODELS}")
+        print(f"shared ckpt={SHARED_CHECKPOINT}")
         print(f"convnext ckpt={INTERPOLED_CONVNEXT_CHECKPOINT}")
         print(f"convnext_droppath0 ckpt={INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT}")
+    elif BACKBONE == "shared":
+        print(f"shared ckpt={SHARED_CHECKPOINT}")
 
     dataset = ImageNetDataset(split=SPLIT, transforms=build_val_transforms())
     labels: list[int] = dataset.ds.data.column("label").to_pylist()
@@ -2750,9 +2788,9 @@ def main() -> None:
     for spec in runs:
         cid = spec["class_id"]
         who = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked"
-        if BACKBONE == "shared":
+        if is_shared_run(spec):
             sched = f"D={spec['D']}"
-            model_s = "shared_convnext"
+            model_s = _SHARED_MODEL_KEY
         else:
             model_s = spec.get("model", "?")
             if "repeats" in spec:
@@ -2769,28 +2807,21 @@ def main() -> None:
     if args.list_only:
         return
 
+    needed = sorted({r.get("model") or _SHARED_MODEL_KEY for r in runs})
     models: dict[str, nn.Module] = {}
-    if BACKBONE == "shared":
-        if not SHARED_CHECKPOINT.is_file():
-            raise SystemExit(f"checkpoint not found: {SHARED_CHECKPOINT}")
-        models["shared"] = load_shared_convnext(SHARED_CHECKPOINT).to(device).eval()
-        assert models["shared"].deltifiedStage3[0].eulerStep == 1.0
-    else:
-        needed = sorted({r["model"] for r in runs})
-        for key in needed:
-            models[key] = load_interpoled_model(key).to(device).eval()
+    for key in needed:
+        models[key] = load_interpoled_model(key).to(device).eval()
+        if key == _SHARED_MODEL_KEY:
+            assert models[key].deltifiedStage3[0].eulerStep == 1.0
 
     completed: list[dict] = []
     for spec in runs:
-        marker = OUT_DIR / spec["name"] / "config.json"
+        marker = out_dir_for(spec) / spec["name"] / "config.json"
         if args.skip_existing and marker.is_file():
             print(f"skip existing {spec['name']}")
             continue
-        if BACKBONE == "shared":
-            model = models["shared"]
-        else:
-            model = models[spec["model"]]
-        completed.append(run_one(model, dataset, class_names, spec))
+        model_key = spec.get("model") or _SHARED_MODEL_KEY
+        completed.append(run_one(models[model_key], dataset, class_names, spec))
 
     if SCATTER_OVERLAY_BY_D and completed:
         by_key: dict[tuple, list[dict]] = {}
@@ -2803,16 +2834,17 @@ def main() -> None:
             group_meta = sorted(group_meta, key=lambda r: (r["D"], r["name"]))
             tag = "-".join(r.get("overlay_label", str(r["D"])) for r in group_meta)
             tag = tag.replace(" ", "_").replace("/", "div")[:120]
+            overlay_root = Path(group_meta[0]["run_dir"]).parent
             group = [load_overlay_maps(m) for m in group_meta]
             try:
-                out = OUT_DIR / f"scatter_h_overlay_{tag}.png"
+                out = overlay_root / f"scatter_h_overlay_{tag}.png"
                 write_static(
                     out,
                     lambda g=group, p=out: scatter_overlay_by_d(g, path=p, channel=SCATTER_CHANNEL),
                 )
                 if _exists_nonempty(out):
                     print(f"overlay scatter -> {out}")
-                out_means = OUT_DIR / f"scatter_h_means_overlay_{tag}.png"
+                out_means = overlay_root / f"scatter_h_means_overlay_{tag}.png"
                 write_static(
                     out_means,
                     lambda g=group, p=out_means: scatter_overlay_means_by_d(
