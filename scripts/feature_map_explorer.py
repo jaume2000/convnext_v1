@@ -286,11 +286,6 @@ SCATTER_ANIM_CMAP = "turbo"
 # Spaghetti: trajectories d ↦ value for a fixed feature sample (colour = channel).
 SPAGHETTI_MAX_LINES = 200
 SPAGHETTI_SEED = 0
-# Building a GIF loads every frame into RAM — skip when D is large.
-# (9999 used to force GIFs for D=500 C×H maps and OOM'd ~5GB on 8k-wide frames.)
-GIF_MAX_FRAMES = 256
-# Extra guard: total RGB pixels across frames (w*h*n). ~200MP ≈ 0.6GB raw.
-GIF_MAX_PIXELS = 200_000_000
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
 KEEP_FRAMES = True
 MEAN_MAPS_NAME = "mean_maps.pt"
@@ -342,35 +337,17 @@ def should_write(path: Path) -> bool:
     """False when SKIP_EXISTING_FIGURES and a non-empty file already exists (unless FORCE)."""
     if FORCE_RECOMPUTE or not SKIP_EXISTING_FIGURES:
         return True
-    if path.suffix.lower() in (".mp4", ".gif"):
+    if path.suffix.lower() == ".mp4":
         return not _exists_video(path)
     return not _exists_nonempty(path)
 
 
-def _gif_frame_budget_ok(n_frames: int, frame_dir: Path | None = None) -> bool:
-    """False when a GIF would load too many frames / pixels into RAM."""
-    if n_frames > GIF_MAX_FRAMES:
-        return False
-    if frame_dir is None:
-        return True
-    first = next(iter(sorted(frame_dir.glob("frame_*.png"))), None)
-    if first is None:
-        return True
-    with Image.open(first) as im:
-        w, h = im.size
-    return w * h * n_frames <= GIF_MAX_PIXELS
-
-
-def video_products_ready(out_stem: Path, n_frames: int) -> bool:
-    """True if the mp4/gif products write_video would produce already exist."""
+def video_products_ready(out_stem: Path, n_frames: int | None = None) -> bool:
+    """True if the mp4 ``write_video`` would produce already exists."""
+    del n_frames  # kept for call-site compatibility
     if FORCE_RECOMPUTE or not SKIP_EXISTING_FIGURES:
         return False
-    mp4_ok = _exists_video(out_stem.with_suffix(".mp4"))
-    frame_dir = out_stem.parent / "frames" / out_stem.name
-    # Only require a gif when we would actually attempt to write one.
-    if not _gif_frame_budget_ok(n_frames, frame_dir if frame_dir.is_dir() else None):
-        return mp4_ok
-    return mp4_ok and _exists_video(out_stem.with_suffix(".gif"))
+    return _exists_video(out_stem.with_suffix(".mp4"))
 
 
 def write_static(path: Path, fn) -> None:
@@ -1273,22 +1250,6 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
     plt.close(fig)
 
 
-def _load_rgb_frames(frame_dir: Path) -> list[Image.Image]:
-    frames = sorted(frame_dir.glob("frame_*.png"))
-    images = [Image.open(p).convert("RGB") for p in frames]
-    if len({im.size for im in images}) <= 1:
-        return images
-    width = max(im.width for im in images)
-    height = max(im.height for im in images)
-    padded = []
-    for im in images:
-        canvas = Image.new("RGB", (width, height), "white")
-        canvas.paste(im, ((width - im.width) // 2, (height - im.height) // 2))
-        im.close()
-        padded.append(canvas)
-    return padded
-
-
 # MPEG-4 Part 2 rejects frames with any side > 8191 (ResNet C×H at 8px/cell is 8236 wide).
 _MPEG4_MAX_SIDE = 8190
 
@@ -1368,11 +1329,10 @@ def _write_mp4_opencv(frame_dir: Path, mp4: Path, fps: float) -> bool:
 
 
 def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -> dict[str, Path]:
-    """Write mp4 (ffmpeg or OpenCV) and/or gif. Never delete frames if nothing was written."""
+    """Write mp4 (ffmpeg or OpenCV). Never delete frames if nothing was written."""
+    del n_frames  # retained for call-site compatibility
     written: dict[str, Path] = {}
     mp4 = out_stem.with_suffix(".mp4")
-    gif = out_stem.with_suffix(".gif")
-    budget_ok = _gif_frame_budget_ok(n_frames, frame_dir)
 
     if should_write(mp4):
         if _write_mp4_ffmpeg(frame_dir, mp4, fps) or _write_mp4_opencv(frame_dir, mp4, fps):
@@ -1380,31 +1340,6 @@ def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -
     elif _exists_video(mp4):
         written["mp4"] = mp4
         print(f"  skip existing {mp4.name}")
-
-    # GIF loads every frame in RAM — only attempt when the frame/pixel budget fits.
-    if "mp4" not in written and not budget_ok:
-        print(
-            f"  WARNING: no mp4 for {out_stem.name} and GIF budget exceeded "
-            f"(n={n_frames} > {GIF_MAX_FRAMES} or too many pixels); keeping frames"
-        )
-    elif budget_ok:
-        if should_write(gif):
-            images = _load_rgb_frames(frame_dir)
-            images[0].save(
-                gif,
-                save_all=True,
-                append_images=images[1:],
-                duration=max(1, int(round(1000 / max(fps, 1e-3)))),
-                loop=0,
-            )
-            written["gif"] = gif
-            for im in images:
-                im.close()
-        elif _exists_video(gif):
-            written["gif"] = gif
-            print(f"  skip existing {gif.name}")
-    elif "mp4" in written:
-        print(f"  skip gif for {out_stem.name} (n={n_frames} frames / pixel budget)")
 
     if not written:
         print(f"  WARNING: no video written for {out_stem.name}; keeping frames in {frame_dir}")
