@@ -3,7 +3,8 @@
 #SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+# 1 GPU ≈ 1/4 Leonardo booster node → 8 cores (32 forces a full idle node).
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
