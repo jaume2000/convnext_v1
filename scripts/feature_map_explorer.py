@@ -1220,6 +1220,26 @@ def frame_heading(run_name: str, formula: str, depth: str) -> str:
     return f"{run_name}\n{formula}\n{depth}"
 
 
+def _padded_finite_limits(
+    *tensors: torch.Tensor,
+    pad_frac: float = 0.02,
+    default: float = 1.0,
+) -> tuple[float, float]:
+    """Axis limits from finite values only (large ES can yield Inf/NaN)."""
+    chunks: list[torch.Tensor] = []
+    for t in tensors:
+        f = t[torch.isfinite(t)]
+        if f.numel():
+            chunks.append(f.reshape(-1))
+    if not chunks:
+        return -default, default
+    finite = torch.cat(chunks)
+    lo = float(finite.min().item())
+    hi = float(finite.max().item())
+    pad = pad_frac * (hi - lo) if hi > lo else default
+    return lo - pad, hi + pad
+
+
 def draw_style(maps: torch.Tensor, kind: str) -> dict:
     finite = maps[torch.isfinite(maps)]
 
@@ -1793,13 +1813,12 @@ def scatter_io(
     cmap = plt.cm.viridis
     flat_in = inputs.reshape(n, -1)
     flat_out = outputs.reshape(n, -1)
-    lo = min(flat_in.min().item(), flat_out.min().item())
-    hi = max(flat_in.max().item(), flat_out.max().item())
+    feat_idx = _sample_feature_indices(flat_in.shape[1], max_points, SCATTER_ANIM_SEED)
+    lo, hi = _padded_finite_limits(flat_in[:, feat_idx], flat_out[:, feat_idx])
     if draw_y_equals_x:
         ax.plot([lo, hi], [lo, hi], color="0.7", lw=1, zorder=0, label="y = x")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
     # Fixed feature sample across depths; subsample depths when D is huge.
-    feat_idx = _sample_feature_indices(flat_in.shape[1], max_points, SCATTER_ANIM_SEED)
     depth_idx = _depth_indices(n)
     for d in depth_idx:
         a = flat_in[d, feat_idx]
@@ -1824,6 +1843,8 @@ def scatter_io(
     ax.set_ylabel(ylabel)
     if own_fig:
         ax.set_title(title)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.3)
     if own_fig:
@@ -1864,6 +1885,7 @@ def scatter_io_means(
 
     mean_in = _channel_spatial_means(inputs)
     mean_out = _channel_spatial_means(outputs)
+    lo, hi = _padded_finite_limits(mean_in, mean_out)
     cmap = plt.cm.viridis
     ch_colors = np.arange(n_c, dtype=np.float64)
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
@@ -1900,6 +1922,8 @@ def scatter_io_means(
             )
             sm.set_array([])
             fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(alpha=0.3)
     if own_fig:
@@ -2065,6 +2089,7 @@ def spaghetti_trajectories(
     ax.set_xlabel("t = d · ES")
     ax.set_ylabel(ylabel)
     ax.set_title(f"{title}\n({ys.shape[1]} trajectories)")
+    ax.set_ylim(*_padded_finite_limits(flat[:, idx]))
     ax.grid(alpha=0.3)
     fig.savefig(path, dpi=140)
     plt.close(fig)
@@ -2087,7 +2112,7 @@ def spaghetti_trajectories_means(
             raise ValueError(f"spaghetti channel {channel} outside 0..{n_c - 1}")
         maps = maps[:, channel : channel + 1]
         n_c = 1
-    ys = _channel_spatial_means(maps).numpy()  # [T, C]
+    ys = _channel_spatial_means(maps)
     t = np.arange(n, dtype=np.float64) * float(euler_step)
     cmap = plt.get_cmap(SCATTER_ANIM_CMAP)
     colors = cmap(np.arange(n_c) / max(n_c - 1, 1))
@@ -2095,13 +2120,14 @@ def spaghetti_trajectories_means(
     fig, ax = plt.subplots(figsize=(8.0, 5.0), layout="constrained")
     ax.axhline(0.0, color="0.85", lw=1, zorder=0)
     for c in range(n_c):
-        ax.plot(t, ys[:, c], color=colors[c], alpha=0.55, lw=1.0, solid_capstyle="round")
+        ax.plot(t, ys[:, c].numpy(), color=colors[c], alpha=0.55, lw=1.0, solid_capstyle="round")
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max(n_c - 1, 1)))
     sm.set_array([])
     fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="channel")
     ax.set_xlabel("t = d · ES")
     ax.set_ylabel(ylabel)
     ax.set_title(f"{title}\n({n_c} channel means)")
+    ax.set_ylim(*_padded_finite_limits(ys))
     ax.grid(alpha=0.3)
     fig.savefig(path, dpi=140)
     plt.close(fig)
@@ -2132,9 +2158,7 @@ def scatter_vs_channel(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
-    lo = vals.min().item()
-    hi = vals.max().item()
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = _padded_finite_limits(vals)
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
     cmap = plt.cm.viridis
@@ -2154,7 +2178,7 @@ def scatter_vs_channel(
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xlim(-0.5, n_c - 0.5)
-    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_ylim(lo, hi)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7, markerscale=2)
     fig.savefig(path, dpi=140)
@@ -2179,9 +2203,7 @@ def scatter_vs_channel_means(
         n_c = 1
     ch_means = _channel_spatial_means(maps)
     ch_axis = np.arange(n_c, dtype=np.float64)
-    lo = ch_means.min().item()
-    hi = ch_means.max().item()
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
+    lo, hi = _padded_finite_limits(ch_means)
     cmap = plt.get_cmap(SCATTER_ANIM_CMAP)
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5), layout="constrained")
@@ -2208,7 +2230,7 @@ def scatter_vs_channel_means(
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.set_xlim(-0.5, n_c - 0.5)
-    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_ylim(lo, hi)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7, markerscale=1.5)
     fig.savefig(path, dpi=140)
@@ -2236,10 +2258,7 @@ def scatter_vs_channel_animation(
     rng = np.random.default_rng(seed)
     ch_plot = ch + rng.uniform(-0.35, 0.35, size=ch.shape)
     vals = flat[:, idx]
-    lo = vals.min().item()
-    hi = vals.max().item()
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
-    lo, hi = lo - pad, hi + pad
+    lo, hi = _padded_finite_limits(vals)
 
     if frame_dir.exists():
         shutil.rmtree(frame_dir)
@@ -2286,10 +2305,7 @@ def scatter_vs_channel_means_animation(
     n, n_c = maps.shape[:2]
     ch_means = _channel_spatial_means(maps)
     ch_axis = np.arange(n_c, dtype=np.float64)
-    lo = ch_means.min().item()
-    hi = ch_means.max().item()
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
-    lo, hi = lo - pad, hi + pad
+    lo, hi = _padded_finite_limits(ch_means)
 
     if frame_dir.exists():
         shutil.rmtree(frame_dir)
@@ -2348,10 +2364,7 @@ def scatter_io_animation(
     tracked_in = flat_in[:, idx]
     tracked_out = flat_out[:, idx]
     channels = (idx // spatial).numpy()
-    lo = min(tracked_in.min().item(), tracked_out.min().item())
-    hi = max(tracked_in.max().item(), tracked_out.max().item())
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
-    lo, hi = lo - pad, hi + pad
+    lo, hi = _padded_finite_limits(tracked_in, tracked_out)
 
     if frame_dir.exists():
         shutil.rmtree(frame_dir)
@@ -2402,10 +2415,7 @@ def scatter_io_means_animation(
     mean_in = _channel_spatial_means(inputs)
     mean_out = _channel_spatial_means(outputs)
     ch = np.arange(n_c, dtype=np.float64)
-    lo = min(mean_in.min().item(), mean_out.min().item())
-    hi = max(mean_in.max().item(), mean_out.max().item())
-    pad = 0.02 * (hi - lo) if hi > lo else 1.0
-    lo, hi = lo - pad, hi + pad
+    lo, hi = _padded_finite_limits(mean_in, mean_out)
 
     if frame_dir.exists():
         shutil.rmtree(frame_dir)
