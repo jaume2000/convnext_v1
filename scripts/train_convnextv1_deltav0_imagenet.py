@@ -26,15 +26,15 @@ import torch
 load_dotenv()
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
-EXPERIMENT_NAME = "convnextv1_deltav0_imagenet"
+EXPERIMENT_NAME = "convnextv1_deltav0_imagenet_wu10_e50_lr1e-4"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = True
 USE_DDP = True
-EPOCHS = 100
-WARMUP_EPOCHS = 0
+EPOCHS = 50
+WARMUP_EPOCHS = 10
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-5
+LR = 1e-4
 MIN_LR = 1e-7
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
