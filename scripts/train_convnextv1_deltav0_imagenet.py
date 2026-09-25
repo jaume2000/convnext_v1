@@ -26,7 +26,7 @@ import torch
 load_dotenv()
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
-EXPERIMENT_NAME = "convnextv1_deltav0_imagenet_wu10_e50_lr1e-4"
+EXPERIMENT_NAME = "convnextv1_deltav0_imagenet_wu10_e50_lr1e-3"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = True
 USE_DDP = True
