@@ -34,7 +34,7 @@ EPOCHS = 50
 WARMUP_EPOCHS = 10
 BATCH_SIZE = 256
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-4
+LR = 1e-3
 MIN_LR = 1e-7
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
