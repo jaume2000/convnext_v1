@@ -13,16 +13,17 @@
 
 # Stage-3 feature-map trajectories. Config lives in
 # scripts/feature_map_explorer.py:
-#   BACKBONE = "interpoled"  # also runs convnext_shared + swin/resnet/convnext
-#   INTERPOLED_MODELS = ["convnext_shared", "swin", "resnet50", ...]
-#   RUNS_SHARED / INTERPOLED_EXPERIMENTS
+#   BACKBONE = "interpoled"    # default: random-init six + shared + interpoled sweeps
+#   BACKBONE = "random_init"   # only the six random-weight probes
+#   BACKBONE = "shared"        # pretrained shared-only
+#   RUNS_SHARED / INTERPOLED_EXPERIMENTS / RUNS_RANDOM_INIT
 #
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 #
 # Optional overrides:
 #   TRAIN_ARGS='--list-only'
-#   TRAIN_ARGS='--only convnext_shared_baseline_D9_ES1_c289_n1 swin_R100_ES0.01_bilinear_c289_n1'
+#   TRAIN_ARGS='--only convnext_shared_rand_D9_ES1_ls1_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
 #   TRAIN_ARGS='--keep-frames'
 
@@ -97,12 +98,12 @@ fi
 SHARED_CKPT="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
 INTERPOLED_CKPT="${PROJECT_ROOT}/outputs/convnextv1_imagenet/weights/last.pth"
 INTERPOLED_CKPT_DP0="${PROJECT_ROOT}/outputs/convnextv1_imagenet_droppath0/weights/last.pth"
+# random_init probes need no checkpoint; pretrained sweeps still warn if missing.
 if [[ ! -f "${SHARED_CKPT}" && ! -f "${INTERPOLED_CKPT}" && ! -f "${INTERPOLED_CKPT_DP0}" ]]; then
-  echo "No feature-map checkpoint found (expected shared and/or interpoled)." >&2
+  echo "WARNING: no pretrained feature-map checkpoint found (ok for BACKBONE=random_init)." >&2
   echo "  shared:            ${SHARED_CKPT}" >&2
   echo "  interpoled:        ${INTERPOLED_CKPT}" >&2
   echo "  interpoled dp0:    ${INTERPOLED_CKPT_DP0}" >&2
-  exit 1
 fi
 
 SCRIPT="${PROJECT_ROOT}/scripts/feature_map_explorer.py"

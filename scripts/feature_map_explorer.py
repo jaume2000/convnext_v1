@@ -1,11 +1,13 @@
 """Stage-3 feature-map trajectories for shared ConvNeXt or interpoled backbones.
 
-Default (``BACKBONE = "interpoled"``): one job sweeps ``convnext_shared`` (DeltaConvNext
-shared residual × D) plus interpoled stage-3 schedules on ``swin`` / ``resnet*`` /
-``convnext*``. Weight schedule is ``plain`` (θ=θ_⌊t⌋) or ``bilinear``
-(θ=(1-α)θ_k+αθ_{k+1}). Swin NHWC is wrapped to NCHW for the same analysis/plots.
+Default (``BACKBONE = "interpoled"``): all probes in one job —
+  1. random-init six (LayerScale=1): SHARED | NON-shared plain | NON-shared bilinear
+     at R1/D=9 and R100/D=900
+  2. pretrained ``convnext_shared`` residual × D sweep
+  3. interpoled stage-3 on swin / resnet* / convnext* (plain + bilinear)
 
-``BACKBONE = "shared"`` keeps the old shared-only sweep.
+``BACKBONE = "random_init"`` keeps only the six random-weight probes.
+``BACKBONE = "shared"`` keeps the pretrained shared-only sweep.
 
 Submit:
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
@@ -52,18 +54,25 @@ from models.backbones.interpoled_convnext import InterpoledConvNextV1
 from models.backbones.interpoled_resnet import InterpoledResNet50, InterpoledResNet101
 from models.backbones.interpoled_swin import InterpoledSwinT
 from models.backbones.rk_integrate import bilinear_time_steps, call_lerped
+from models.blocks.layerScale import LayerScale
 from utils.env import load_dotenv
 
 # --------------------------------------------------------------------------- config
-# "shared" = only DeltaConvNext shared residual × D
-# "interpoled" = convnext_shared + interpoled stage-3 models (swin / resnet / convnext)
-BACKBONE = "interpoled"  # "shared" | "interpoled"
+# "interpoled"   = random-init six + pretrained shared + interpoled sweeps (default)
+# "random_init"  = only the six random-weight probes
+# "shared"       = only pretrained DeltaConvNext shared residual × D
+BACKBONE = "interpoled"  # "interpoled" | "random_init" | "shared"
+RANDOM_INIT_SEED = 0
+# Override LayerScale gamma after random init (recipe default is 1e-6).
+RANDOM_INIT_LAYERSCALE = 1.0
 
 # Models included when BACKBONE == "interpoled" (docs / startup log).
 INTERPOLED_MODELS = [
-    "convnext_shared",    # outputs/shared_convnextv1_imagenet (shared residual × D)
-    "convnext",           # outputs/convnextv1_imagenet (with drop-path)
-    "convnext_droppath0", # outputs/convnextv1_imagenet_droppath0
+    "convnext_shared_rand",  # random-init DeltaConvNext (LayerScale override)
+    "convnext_rand",         # random-init InterpoledConvNext (LayerScale override)
+    "convnext_shared",       # outputs/shared_convnextv1_imagenet (shared residual × D)
+    "convnext",              # outputs/convnextv1_imagenet (with drop-path)
+    "convnext_droppath0",    # outputs/convnextv1_imagenet_droppath0
     "resnet50",
     "resnet101",
     "swin",
@@ -177,18 +186,22 @@ INTERPOLED_EXPERIMENTS += [
 
 INTERPOLED_MODEL_KEYS = (
     "convnext_shared",
+    "convnext_shared_rand",
     "convnext",
+    "convnext_rand",
     "convnext_droppath0",
     "resnet50",
     "resnet101",
     "swin",
 )
-_CONVNEXT_KEYS = ("convnext", "convnext_droppath0")
+_CONVNEXT_KEYS = ("convnext", "convnext_rand", "convnext_droppath0")
 _SHARED_MODEL_KEY = "convnext_shared"
+_SHARED_RAND_MODEL_KEY = "convnext_shared_rand"
+_SHARED_MODEL_KEYS = (_SHARED_MODEL_KEY, _SHARED_RAND_MODEL_KEY)
 
 
 def is_shared_run(spec: dict) -> bool:
-    return spec.get("model") == _SHARED_MODEL_KEY or BACKBONE == "shared"
+    return spec.get("model") in _SHARED_MODEL_KEYS or BACKBONE == "shared"
 
 
 def out_dir_for(spec: dict) -> Path:
@@ -218,8 +231,8 @@ def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
     runs: list[dict] = []
     for exp in experiments:
         model = exp.get("model")
-        if model == _SHARED_MODEL_KEY:
-            raise ValueError("Use RUNS_SHARED / build_shared_runs for convnext_shared")
+        if model in _SHARED_MODEL_KEYS:
+            raise ValueError("Use RUNS_SHARED / build_shared_runs / RUNS_RANDOM_INIT for shared")
         if model not in INTERPOLED_MODEL_KEYS:
             raise ValueError(f"Unknown interpoled model {model!r}; expected one of {INTERPOLED_MODEL_KEYS}")
         run = dict(exp)
@@ -230,15 +243,89 @@ def build_interpoled_runs(experiments: list[dict]) -> list[dict]:
     return runs
 
 
-if BACKBONE == "shared":
+# Random-init probes:
+#   1. SHARED  — DeltaConvNext, one residual × D (D=9 ↔ R1, D=900 ↔ R100)
+#   2. NON-shared plain
+#   3. NON-shared bilinear
+# Dedicated model keys so they coexist with pretrained checkpoints in one job.
+# Bilinear only applies to non-shared (distinct θ_k); never to shared.
+_FM_RAND = {
+    "class_id": 289,
+    "max_images": 1,
+    "batch_size": 1,
+    "random_init": True,
+    "fps": 1,
+    "ignore_top_k_channels": 0,
+    "method": None,
+}
+_RAND_NONSHARED = {"model": "convnext_rand", **_FM_RAND}
+_RAND_SHARED = {"model": _SHARED_RAND_MODEL_KEY, **_FM_RAND}
+RUNS_RANDOM_INIT: list[dict] = [
+    # --- R1 / D=9 ---
+    {
+        **_RAND_SHARED,
+        "name": "convnext_shared_rand_D9_ES1_ls1_c289_n1",
+        "D": 9,
+        "euler_step": 1.0,
+    },
+    {
+        **_RAND_NONSHARED,
+        "name": "convnext_rand_nonshared_R1_ES1_ls1_c289_n1",
+        "repeats": 1,
+        "euler_step": 1.0,
+        "weight_interpolation": "plain",
+    },
+    {
+        **_RAND_NONSHARED,
+        "name": "convnext_rand_nonshared_R1_ES1_bilinear_ls1_c289_n1",
+        "repeats": 1,
+        "euler_step": 1.0,
+        "weight_interpolation": "bilinear",
+    },
+    # --- R100 / D=900 (9×100 steps) ---
+    {
+        **_RAND_SHARED,
+        "name": "convnext_shared_rand_D900_ES1_ls1_c289_n1",
+        "D": 900,
+        "euler_step": 1.0,
+        "fps": 80,
+    },
+    {
+        **_RAND_NONSHARED,
+        "name": "convnext_rand_nonshared_R100_ES1_ls1_c289_n1",
+        "repeats": 100,
+        "euler_step": 1.0,
+        "fps": 80,
+        "weight_interpolation": "plain",
+    },
+    {
+        **_RAND_NONSHARED,
+        "name": "convnext_rand_nonshared_R100_ES1_bilinear_ls1_c289_n1",
+        "repeats": 100,
+        "euler_step": 1.0,
+        "fps": 80,
+        "weight_interpolation": "bilinear",
+    },
+]
+
+if BACKBONE == "random_init":
+    OUT_DIR = OUT_DIR_INTERPOLED
+    RUNS = list(RUNS_RANDOM_INIT)
+elif BACKBONE == "shared":
     OUT_DIR = OUT_DIR_SHARED
     RUNS = build_shared_runs(RUNS_SHARED)
 elif BACKBONE == "interpoled":
     OUT_DIR = OUT_DIR_INTERPOLED
-    # Shared residual first, then bilinear / RK4 / plain interpoled sweeps.
-    RUNS = build_shared_runs(RUNS_SHARED) + build_interpoled_runs(INTERPOLED_EXPERIMENTS)
+    # Random-init probes first, then pretrained shared, then interpoled sweeps.
+    RUNS = (
+        list(RUNS_RANDOM_INIT)
+        + build_shared_runs(RUNS_SHARED)
+        + build_interpoled_runs(INTERPOLED_EXPERIMENTS)
+    )
 else:
-    raise ValueError(f"Unknown BACKBONE={BACKBONE!r}; use 'shared' or 'interpoled'")
+    raise ValueError(
+        f"Unknown BACKBONE={BACKBONE!r}; use 'interpoled', 'random_init', or 'shared'"
+    )
 
 CHANNELS: list[int] | None = None
 N_AUTO_CHANNELS = 3
@@ -410,9 +497,27 @@ def resolve_blocks(spec: dict, n_blocks: int) -> list[int]:
     return blocks
 
 
-def load_shared_convnext(checkpoint: Path) -> DeltaConvNext:
+@torch.no_grad()
+def set_layerscale_value(model: nn.Module, value: float) -> int:
+    """Fill every LayerScale γ with ``value``. Returns how many modules were updated."""
+    n = 0
+    for m in model.modules():
+        if isinstance(m, LayerScale):
+            m.gamma.fill_(value)
+            n += 1
+    return n
+
+
+def load_shared_convnext(checkpoint: Path | None = None) -> DeltaConvNext:
     model = DeltaConvNext(useDeltas=False)
     model.rewire()
+    if checkpoint is None:
+        n_ls = set_layerscale_value(model, RANDOM_INIT_LAYERSCALE)
+        print(
+            f"Random-init shared ConvNeXt (seed={RANDOM_INIT_SEED}, "
+            f"LayerScale={RANDOM_INIT_LAYERSCALE:g} on {n_ls} modules)"
+        )
+        return model
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -424,42 +529,94 @@ def load_shared_convnext(checkpoint: Path) -> DeltaConvNext:
     return model
 
 
-def load_interpoled_convnext(checkpoint: Path) -> InterpoledConvNextV1:
+def load_interpoled_convnext(
+    checkpoint: Path | None = None,
+    *,
+    share_stage3: bool = False,
+    share_src: int = 5,
+) -> InterpoledConvNextV1:
     model = InterpoledConvNextV1()
+    if checkpoint is None:
+        if share_stage3:
+            share_stage3_weights(model, src=share_src)
+        n_ls = set_layerscale_value(model, RANDOM_INIT_LAYERSCALE)
+        tied = (
+            f", stage-3 tied to block {share_src}" if share_stage3 else ""
+        )
+        print(
+            f"Random-init interpoled ConvNeXt (seed={RANDOM_INIT_SEED}{tied}, "
+            f"LayerScale={RANDOM_INIT_LAYERSCALE:g} on {n_ls} modules)"
+        )
+        return model
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     model.load_state_dict(state, strict=True)
     epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
     print(f"Loaded interpoled convnext {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
+    if share_stage3:
+        share_stage3_weights(model, src=share_src)
+        print(f"  tied stage-3 residual weights to block {share_src}")
     return model
 
 
-def load_interpoled_model(model_key: str) -> nn.Module:
+@torch.no_grad()
+def share_stage3_weights(model: InterpoledConvNextV1, src: int = 5) -> None:
+    """Copy stage-3 residual ``src`` weights into all 9 residual slots (1×9 shared)."""
+    n = int(model.depths[2])
+    if not 0 <= src < n:
+        raise ValueError(f"share_src={src} out of range [0, {n})")
+    src_state = model.stage3[src].state_dict()
+    for i in range(n):
+        if i != src:
+            model.stage3[i].load_state_dict(src_state)
+
+
+def _seed_random_init() -> None:
+    torch.manual_seed(RANDOM_INIT_SEED)
+    np.random.seed(RANDOM_INIT_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(RANDOM_INIT_SEED)
+
+
+def load_interpoled_model(model_key: str, *, random_init: bool = False) -> nn.Module:
+    if random_init or model_key in ("convnext_rand", _SHARED_RAND_MODEL_KEY):
+        _seed_random_init()
     if model_key == _SHARED_MODEL_KEY:
+        if random_init:
+            return load_shared_convnext(None)
         if not SHARED_CHECKPOINT.is_file():
             raise FileNotFoundError(f"Shared ConvNeXt checkpoint not found: {SHARED_CHECKPOINT}")
         return load_shared_convnext(SHARED_CHECKPOINT)
+    if model_key == _SHARED_RAND_MODEL_KEY:
+        return load_shared_convnext(None)
     if model_key == "convnext":
+        if random_init:
+            return load_interpoled_convnext(None)
         if not INTERPOLED_CONVNEXT_CHECKPOINT.is_file():
             raise FileNotFoundError(f"ConvNeXt checkpoint not found: {INTERPOLED_CONVNEXT_CHECKPOINT}")
         return load_interpoled_convnext(INTERPOLED_CONVNEXT_CHECKPOINT)
+    if model_key == "convnext_rand":
+        return load_interpoled_convnext(None)
     if model_key == "convnext_droppath0":
+        if random_init:
+            _seed_random_init()
+            return load_interpoled_convnext(None)
         if not INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT.is_file():
             raise FileNotFoundError(
                 f"ConvNeXt droppath0 checkpoint not found: {INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT}"
             )
         return load_interpoled_convnext(INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT)
     if model_key == "resnet50":
-        model = InterpoledResNet50(weights="DEFAULT")
-        print(f"Loaded torchvision ResNet-50 DEFAULT, n_blocks={model.n_blocks}")
+        model = InterpoledResNet50(weights=None if random_init else "DEFAULT")
+        print(f"Loaded torchvision ResNet-50 {'random' if random_init else 'DEFAULT'}, n_blocks={model.n_blocks}")
         return model
     if model_key == "resnet101":
-        model = InterpoledResNet101(weights="DEFAULT")
-        print(f"Loaded torchvision ResNet-101 DEFAULT, n_blocks={model.n_blocks}")
+        model = InterpoledResNet101(weights=None if random_init else "DEFAULT")
+        print(f"Loaded torchvision ResNet-101 {'random' if random_init else 'DEFAULT'}, n_blocks={model.n_blocks}")
         return model
     if model_key == "swin":
-        model = InterpoledSwinT(weights="DEFAULT")
-        print(f"Loaded torchvision Swin-T DEFAULT, n_blocks={model.n_blocks}")
+        model = InterpoledSwinT(weights=None if random_init else "DEFAULT")
+        print(f"Loaded torchvision Swin-T {'random' if random_init else 'DEFAULT'}, n_blocks={model.n_blocks}")
         return model
     raise ValueError(f"Unknown model_key={model_key!r}")
 
@@ -2472,7 +2629,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             field_blocks = [model.deltifiedStage3[0]] * D
             blocks = None
             wi = "plain"
-            model_key = _SHARED_MODEL_KEY
+            model_key = spec.get("model") or _SHARED_MODEL_KEY
             overlay_label = f"D={D}"
             enter_fn = lambda batch, m=model: m.stage2(m.stage1(m.stem(batch)))
             print(
@@ -2698,11 +2855,21 @@ def main() -> None:
     OUT_DIR_INTERPOLED.mkdir(parents=True, exist_ok=True)
     print(f"device={device}  backbone={BACKBONE}  out_shared={OUT_DIR_SHARED}")
     print(f"  out_interpoled={OUT_DIR_INTERPOLED}")
-    if BACKBONE == "interpoled":
+    if BACKBONE == "random_init":
+        print(
+            f"random_init seed={RANDOM_INIT_SEED}  "
+            f"LayerScale={RANDOM_INIT_LAYERSCALE:g}  runs={len(RUNS)}"
+        )
+    elif BACKBONE == "interpoled":
         print(f"models={INTERPOLED_MODELS}")
+        print(
+            f"random_init probes={len(RUNS_RANDOM_INIT)}  "
+            f"seed={RANDOM_INIT_SEED}  LayerScale={RANDOM_INIT_LAYERSCALE:g}"
+        )
         print(f"shared ckpt={SHARED_CHECKPOINT}")
         print(f"convnext ckpt={INTERPOLED_CONVNEXT_CHECKPOINT}")
         print(f"convnext_droppath0 ckpt={INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT}")
+        print(f"total runs={len(RUNS)}")
     elif BACKBONE == "shared":
         print(f"shared ckpt={SHARED_CHECKPOINT}")
 
@@ -2725,7 +2892,7 @@ def main() -> None:
         who = f"class {cid} — {class_names[cid]}" if cid is not None else "hand-picked"
         if is_shared_run(spec):
             sched = f"D={spec['D']}"
-            model_s = _SHARED_MODEL_KEY
+            model_s = spec.get("model") or _SHARED_MODEL_KEY
         else:
             model_s = spec.get("model", "?")
             if "repeats" in spec:
@@ -2742,11 +2909,14 @@ def main() -> None:
     if args.list_only:
         return
 
-    needed = sorted({r.get("model") or _SHARED_MODEL_KEY for r in runs})
+    needed_rand: dict[str, bool] = {}
+    for r in runs:
+        key = r.get("model") or _SHARED_MODEL_KEY
+        needed_rand[key] = needed_rand.get(key, False) or bool(r.get("random_init"))
     models: dict[str, nn.Module] = {}
-    for key in needed:
-        models[key] = load_interpoled_model(key).to(device).eval()
-        if key == _SHARED_MODEL_KEY:
+    for key, rand in sorted(needed_rand.items()):
+        models[key] = load_interpoled_model(key, random_init=rand).to(device).eval()
+        if key in _SHARED_MODEL_KEYS:
             assert models[key].deltifiedStage3[0].eulerStep == 1.0
 
     completed: list[dict] = []
