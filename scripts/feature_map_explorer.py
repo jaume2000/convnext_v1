@@ -807,6 +807,27 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
     return participation_ratio(s)
 
 
+def _r1_group_boundaries(block_schedule: list[int], D: int) -> tuple[set[int], set[int]]:
+    """Run-length groups of equal schedule ids → step indices that start / end a group.
+
+    Within each group the multi-step path applies the same residual R times while a
+    parallel R1 path applies it once; after the group, R1 continues from its own state.
+    """
+    if len(block_schedule) != D:
+        raise ValueError(f"block_schedule length {len(block_schedule)} != D={D}")
+    starts: set[int] = set()
+    ends: set[int] = set()
+    d = 0
+    while d < D:
+        starts.add(d)
+        j = d + 1
+        while j < D and block_schedule[j] == block_schedule[d]:
+            j += 1
+        ends.add(j - 1)  # last micro-step index of this group
+        d = j
+    return starts, ends
+
+
 @torch.no_grad()
 def trajectory_stats(
     enter_fn,
@@ -817,6 +838,7 @@ def trajectory_stats(
     method,
     batch_size,
     dataset,
+    block_schedule: list[int] | None = None,
 ):
     """Integrate a sequence of residual fields and collect per-image dynamics + mean maps.
 
@@ -826,6 +848,10 @@ def trajectory_stats(
 
     Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
     i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
+
+    ``block_schedule`` (length D) groups consecutive equal ids into residual "blocks".
+    A parallel R1 trajectory takes one step per group; after each multi-step micro-step
+    we record ||x^{(n)} - x_{R1}|| (and the relative distance).
     """
     method = method.upper() if isinstance(method, str) else method
     D = len(field_blocks)
@@ -835,6 +861,8 @@ def trajectory_stats(
     w = 1.0 / n
     es = float(euler_step)
     mean_x = mean_h = cos_map_h = cos_map_x = norm_map_h = l2_map_h = None
+    schedule = list(block_schedule) if block_schedule is not None else [0] * D
+    group_starts, group_ends = _r1_group_boundaries(schedule, D)
 
     # Per-image series (filled in index order).
     norm_h_i = torch.zeros(n, D + 1, dtype=torch.float64)
@@ -846,6 +874,8 @@ def trajectory_stats(
     cos_x_spatial_i = torch.zeros(n, D, dtype=torch.float64)
     omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES flat
     align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
+    dist_x_r1_i = torch.zeros(n, D, dtype=torch.float64)  # ||x_n - x_R1|| after step d
+    dist_x_r1_rel_i = torch.zeros(n, D, dtype=torch.float64)  # / ||x_R1||
     rect_L_i = torch.zeros(n, dtype=torch.float64)
     rect_N_i = torch.zeros(n, dtype=torch.float64)
     rect_R_i = torch.zeros(n, dtype=torch.float64)
@@ -880,6 +910,8 @@ def trajectory_stats(
         f0 = field_at(field_blocks[0])
         h = f0(x)
         x0 = x.detach()
+        x_r1 = x  # parallel R1 path (one step per residual group)
+        x_r1_ref = None  # R1 state after one step of the current group
         h0_flat = h.flatten(1).detach()
         H_rows: list[torch.Tensor] = []
         path_len = torch.zeros(bsz, dtype=torch.float64, device=device)
@@ -911,12 +943,27 @@ def trajectory_stats(
             if d == D:
                 break
 
+            # Start of a residual group: R1 takes one step from its own input.
+            if d in group_starts:
+                f_r1 = field_at(field_blocks[d])
+                h_r1 = f_r1(x_r1)
+                x_r1_ref = rk_step(f_r1, x_r1, euler_step, method, k1=h_r1)
+
             # Transition d → d+1 uses field_blocks[d] (h already matches for Euler).
             f_step = field_at(field_blocks[d])
             x_next = rk_step(f_step, x, euler_step, method, k1=h)
             h_next = field_at(field_blocks[min(d + 1, D - 1)])(x_next)
             h_next_flat = h_next.flatten(1)
             x_next_flat = x_next.flatten(1)
+
+            # Distance of multi-step state after n steps of this block vs R1's one-step x.
+            assert x_r1_ref is not None
+            dist = (x_next - x_r1_ref).flatten(1).norm(dim=1)
+            rel = dist / x_r1_ref.flatten(1).norm(dim=1).clamp_min(1e-30)
+            dist_x_r1_i[start : start + bsz, d] = dist.double().cpu()
+            dist_x_r1_rel_i[start : start + bsz, d] = rel.double().cpu()
+            if d in group_ends:
+                x_r1 = x_r1_ref
 
             cos_hh = F.cosine_similarity(h_flat, h_next_flat, dim=1).clamp(-1.0, 1.0)
             cos_flat_i[start : start + bsz, d] = (1.0 - cos_hh).double().cpu()
@@ -958,7 +1005,7 @@ def trajectory_stats(
             h_mid = H_rows[mid][bi].reshape(x.shape[1], -1).T  # (H*W, C)
             pr_spatial_i[start + bi] = svd_participation_ratio(h_mid)
 
-        del batch, x, h, x0, H_rows, H_stack
+        del batch, x, h, x0, x_r1, x_r1_ref, H_rows, H_stack
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -977,6 +1024,8 @@ def trajectory_stats(
     omega_channel_mean, omega_channel_std = mean_std(omega_channel_i)
     omega_mean, omega_std = mean_std(omega_i)
     align_mean, align_std = mean_std(align_h0_i)
+    dist_r1_mean, dist_r1_std = mean_std(dist_x_r1_i)
+    dist_r1_rel_mean, dist_r1_rel_std = mean_std(dist_x_r1_rel_i)
 
     # Correlation between flat and spatial ω series (on the mean curves).
     if D >= 2 and omega_mean.std() > 0 and omega_spatial_mean.std() > 0:
@@ -1014,6 +1063,10 @@ def trajectory_stats(
             "omega_h_std": omega_std,
             "cos_dist_x": mean_std(cos_x_flat_i)[0],
             "cos_dist_x_spatial": mean_std(cos_x_spatial_i)[0],
+            "dist_x_r1": dist_r1_mean,
+            "dist_x_r1_std": dist_r1_std,
+            "dist_x_r1_rel": dist_r1_rel_mean,
+            "dist_x_r1_rel_std": dist_r1_rel_std,
         }
     )
 
@@ -1662,6 +1715,9 @@ def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
         "PR_depth_on_mean_traj": cfg.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": cfg.get("PR_spatial_on_mean_traj"),
     }
+    # New R1-distance columns require a trajectory pass; stale caches must recompute.
+    if "dist_x_r1" not in res["pairs"].columns:
+        return None
     scalars_path = run_dir / "table_scalars.csv"
     if scalars_path.is_file():
         res["scalars"] = pd.read_csv(scalars_path)
@@ -1685,8 +1741,10 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     label = f"{res['name']} (D={res['D']}, n={res['n_images']})"
     t_state = norms["t"]
     t_pair = pairs["t"] if "t" in pairs.columns else pairs["d"] * es
+    has_r1 = "dist_x_r1" in pairs.columns
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), layout="constrained")
+    nrows = 3 if has_r1 else 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(12, 4 * nrows), layout="constrained")
 
     # (0,0) ||h|| and ||h||/||x||  (h = Δx/ES)
     ax = axes[0, 0]
@@ -1751,6 +1809,42 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     )
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
+
+    # (2,*) distance of multi-step x to parallel R1 trajectory (per residual group)
+    if has_r1:
+        ax = axes[2, 0]
+        _plot_mean_std(
+            ax,
+            t_pair,
+            pairs["dist_x_r1"],
+            pairs.get("dist_x_r1_std", 0.0),
+            label=r"$\|x^{(n)} - x_{\mathrm{R1}}\|$",
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\|x^{(n)} - x_{\mathrm{R1}}\|$",
+            title="distance to parallel R1 (same block, one step)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+        ax = axes[2, 1]
+        _plot_mean_std(
+            ax,
+            t_pair,
+            pairs["dist_x_r1_rel"],
+            pairs.get("dist_x_r1_rel_std", 0.0),
+            label=r"$\|x^{(n)} - x_{\mathrm{R1}}\| / \|x_{\mathrm{R1}}\|$",
+        )
+        ax.set(
+            xlabel="t",
+            ylabel="relative distance",
+            title="relative distance to parallel R1",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    else:
+        print("  note: dist_x_r1 missing from cache — re-run with --force to compute R1 distance")
 
     fig.savefig(out, dpi=140)
     plt.close(fig)
@@ -2676,6 +2770,7 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             method=method,
             batch_size=spec["batch_size"],
             dataset=dataset,
+            block_schedule=blocks if blocks is not None else [0] * D,
         )
         res["name"] = name
         res["spec"] = spec
