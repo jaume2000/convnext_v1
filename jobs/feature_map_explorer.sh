@@ -18,6 +18,8 @@
 #   BACKBONE = "shared"        # pretrained shared-only
 #   RUNS_SHARED / INTERPOLED_EXPERIMENTS / RUNS_RANDOM_INIT
 #
+# Outputs: $WORK/feature_maps/ (FEATURE_MAP_ROOT override), not $HOME/outputs.
+#
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 #
@@ -26,6 +28,7 @@
 #   TRAIN_ARGS='--only convnext_shared_rand_D9_ES1_ls1_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
 #   TRAIN_ARGS='--keep-frames'
+#   FEATURE_MAP_ROOT=/custom/path
 
 set -euo pipefail
 
@@ -89,6 +92,19 @@ export TORCH_HOME="${TORCH_HOME:-${WORK:+$WORK/torch}}"
 export TORCH_HOME="${TORCH_HOME:-${CINECA_SCRATCH:-$HOME}/torch}"
 export TORCH_HOME="${TORCH_HOME/#\~/$HOME}"
 
+# Bulky feature-map outputs go under $WORK (home is ~50G on Leonardo).
+# Override with FEATURE_MAP_ROOT=/path if needed.
+if [[ -z "${FEATURE_MAP_ROOT:-}" ]]; then
+  if [[ -n "${WORK:-}" ]]; then
+    FEATURE_MAP_ROOT="${WORK}/feature_maps"
+  else
+    FEATURE_MAP_ROOT="${PROJECT_ROOT}/outputs"
+  fi
+fi
+FEATURE_MAP_ROOT="${FEATURE_MAP_ROOT/#\~/$HOME}"
+export FEATURE_MAP_ROOT
+mkdir -p "${FEATURE_MAP_ROOT}/featureMaps" "${FEATURE_MAP_ROOT}/featureMaps_interpoled"
+
 DATASET_DIR="ILSVRC___imagenet-1k"
 if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   echo "ImageNet cache not found at ${HF_DATASETS_CACHE}/${DATASET_DIR}" >&2
@@ -113,6 +129,7 @@ echo "Project: ${PROJECT_ROOT}"
 echo "Python: $(which python)"
 echo "HF cache: ${HF_DATASETS_CACHE}"
 echo "TORCH_HOME: ${TORCH_HOME}"
+echo "FEATURE_MAP_ROOT: ${FEATURE_MAP_ROOT}"
 echo "Shared ckpt: ${SHARED_CKPT} ($([ -f "${SHARED_CKPT}" ] && echo ok || echo missing))"
 echo "Interpoled ckpt: ${INTERPOLED_CKPT} ($([ -f "${INTERPOLED_CKPT}" ] && echo ok || echo missing))"
 echo "Interpoled dp0: ${INTERPOLED_CKPT_DP0} ($([ -f "${INTERPOLED_CKPT_DP0}" ] && echo ok || echo missing))"

@@ -12,6 +12,10 @@ Default (``BACKBONE = "interpoled"``): all probes in one job —
 Submit:
   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/feature_map_explorer.sh
 
+Outputs go under ``$WORK/feature_maps/{featureMaps,featureMaps_interpoled}``
+when ``WORK`` is set (Leonardo), else ``outputs/``. Override with
+``FEATURE_MAP_ROOT``.
+
 Or locally:
   python scripts/feature_map_explorer.py
   python scripts/feature_map_explorer.py --list-only
@@ -57,6 +61,24 @@ from models.backbones.rk_integrate import bilinear_time_steps, call_lerped
 from models.blocks.layerScale import LayerScale
 from utils.env import load_dotenv
 
+load_dotenv(_REPO_ROOT / ".env")
+
+
+def _feature_map_root() -> Path:
+    """Where feature-map runs are written.
+
+    Priority: ``FEATURE_MAP_ROOT`` → ``$WORK/feature_maps`` → repo ``outputs/``.
+    On Leonardo home is tiny; keep bulky maps on ``$WORK``.
+    """
+    explicit = os.environ.get("FEATURE_MAP_ROOT")
+    if explicit:
+        return Path(explicit).expanduser()
+    work = os.environ.get("WORK")
+    if work:
+        return Path(work).expanduser() / "feature_maps"
+    return _REPO_ROOT / "outputs"
+
+
 # --------------------------------------------------------------------------- config
 # "interpoled"   = random-init six + pretrained shared + interpoled sweeps (default)
 # "random_init"  = only the six random-weight probes
@@ -85,8 +107,9 @@ INTERPOLED_CONVNEXT_CHECKPOINT = (
 INTERPOLED_CONVNEXT_DROPPATH0_CHECKPOINT = (
     _REPO_ROOT / "outputs" / "convnextv1_imagenet_droppath0" / "weights" / "last.pth"
 )
-OUT_DIR_SHARED = _REPO_ROOT / "outputs" / "featureMaps"
-OUT_DIR_INTERPOLED = _REPO_ROOT / "outputs" / "featureMaps_interpoled"
+_FEATURE_MAP_ROOT = _feature_map_root()
+OUT_DIR_SHARED = _FEATURE_MAP_ROOT / "featureMaps"
+OUT_DIR_INTERPOLED = _FEATURE_MAP_ROOT / "featureMaps_interpoled"
 
 SPLIT = "validation"
 IMAGE_INDICES = [0, 17, 4242]
@@ -2947,8 +2970,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    global KEEP_FRAMES, FORCE_RECOMPUTE
+    global KEEP_FRAMES, FORCE_RECOMPUTE, OUT_DIR_SHARED, OUT_DIR_INTERPOLED, OUT_DIR
     load_dotenv(_REPO_ROOT / ".env")
+    # Re-resolve after dotenv / job exports (WORK, FEATURE_MAP_ROOT).
+    root = _feature_map_root()
+    OUT_DIR_SHARED = root / "featureMaps"
+    OUT_DIR_INTERPOLED = root / "featureMaps_interpoled"
+    if BACKBONE == "shared":
+        OUT_DIR = OUT_DIR_SHARED
+    else:
+        OUT_DIR = OUT_DIR_INTERPOLED
     args = parse_args()
     if args.keep_frames:
         KEEP_FRAMES = True
@@ -2958,7 +2989,8 @@ def main() -> None:
 
     OUT_DIR_SHARED.mkdir(parents=True, exist_ok=True)
     OUT_DIR_INTERPOLED.mkdir(parents=True, exist_ok=True)
-    print(f"device={device}  backbone={BACKBONE}  out_shared={OUT_DIR_SHARED}")
+    print(f"device={device}  backbone={BACKBONE}  feature_map_root={root}")
+    print(f"  out_shared={OUT_DIR_SHARED}")
     print(f"  out_interpoled={OUT_DIR_INTERPOLED}")
     if BACKBONE == "random_init":
         print(
