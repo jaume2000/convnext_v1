@@ -220,6 +220,11 @@ def next_results_csv(output_path: Path) -> Path:
 
 
 if __name__ == "__main__":
+    results2 = OUTPUT_PATH / "results2.csv"
+    if results2.exists():
+        print(f"Skip: {results2} already exists")
+        sys.exit(0)
+
     model = load_interpoled_convnext(CHECKPOINT)
     results = []
     for spec in EXPERIMENTS:
