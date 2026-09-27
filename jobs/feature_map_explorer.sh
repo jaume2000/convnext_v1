@@ -13,7 +13,7 @@
 
 # Stage-3 feature-map trajectories. Config lives in
 # scripts/feature_map_explorer.py:
-#   BACKBONE = "interpoled"    # default: random-init six + shared + interpoled sweeps
+#   BACKBONE = "interpoled"    # default: interpoled (plain→bilinear) + random-init + shared
 #   BACKBONE = "random_init"   # only the six random-weight probes
 #   BACKBONE = "shared"        # pretrained shared-only
 #   RUNS_SHARED / INTERPOLED_EXPERIMENTS / RUNS_RANDOM_INIT

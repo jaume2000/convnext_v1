@@ -1,10 +1,10 @@
 """Stage-3 feature-map trajectories for shared ConvNeXt or interpoled backbones.
 
 Default (``BACKBONE = "interpoled"``): all probes in one job —
-  1. random-init six (LayerScale=1): SHARED | NON-shared plain | NON-shared bilinear
+  1. interpoled stage-3 on swin / resnet* / convnext* (plain first, then bilinear)
+  2. random-init six (LayerScale=1): SHARED | NON-shared plain | NON-shared bilinear
      at R1/D=9 and R100/D=900
-  2. pretrained ``convnext_shared`` residual × D sweep
-  3. interpoled stage-3 on swin / resnet* / convnext* (plain + bilinear)
+  3. pretrained ``convnext_shared`` residual × D sweep
 
 ``BACKBONE = "random_init"`` keeps only the six random-weight probes.
 ``BACKBONE = "shared"`` keeps the pretrained shared-only sweep.
@@ -137,8 +137,7 @@ RUNS_SHARED: list[dict] = [
     {"name": "convnext_shared_D100_ES0.09_RK4_c289_n1_ignore1", "D": 100, "euler_step": 9 / 100, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_SHARED},
 ]
 
-# Interpoled: bilinear θ first (swin → … → convnext), then RK4 probes,
-# then plain θ last (swin → … → convnext).
+# Interpoled: plain θ first (swin → … → convnext), then bilinear, then RK4.
 _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("baseline_R1_ES1_c289_n1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0}),
     ("baseline_R1_ES1_c289_n1_ignore1", {"repeats": 1, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1}),
@@ -149,8 +148,7 @@ _FM_INTERP_SPECS: list[tuple[str, dict]] = [
     ("R100_ES1_c289_n1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0}),
     ("R100_ES1_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
 ]
-# Bilinear weight interpolation (θ=(1-α)θ_k+αθ_{k+1}), same grids as the
-# interpolation scripts. Sweep order: swin first → convnext last.
+# Weight-interp sweeps. Order: swin first → convnext last.
 _FM_BILINEAR_MODELS = ("swin", "resnet101", "resnet50", "convnext_droppath0", "convnext")
 _FM_PLAIN_MODELS = ("swin", "resnet101", "resnet50", "convnext_droppath0", "convnext")
 _FM_BILINEAR_SPECS: list[tuple[str, dict]] = [
@@ -161,7 +159,21 @@ _FM_BILINEAR_SPECS: list[tuple[str, dict]] = [
     ("R100_ES1_bilinear_c289_n1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0}),
     ("R100_ES1_bilinear_c289_n1_ignore1", {"repeats": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1}),
 ]
+# Plain θ first (swin → … → convnext).
 INTERPOLED_EXPERIMENTS: list[dict] = [
+    {
+        "model": model,
+        "name": f"{model}_{suffix}",
+        "class_id": 289,
+        "max_images": 1,
+        "batch_size": 1,
+        **kw,
+    }
+    for model in _FM_PLAIN_MODELS
+    for suffix, kw in _FM_INTERP_SPECS
+]
+# Bilinear weight interpolation (θ=(1-α)θ_k+αθ_{k+1}).
+INTERPOLED_EXPERIMENTS += [
     {
         "model": model,
         "name": f"{model}_{suffix}",
@@ -192,19 +204,6 @@ INTERPOLED_EXPERIMENTS += [
     for model in ("convnext_droppath0", "convnext")
     for wi, wi_sfx in (("bilinear", "_bilinear"), ("plain", ""))
     for ign_sfx, ign in (("", 0), ("_ignore1", 1))
-]
-# Plain θ last (swin → … → convnext).
-INTERPOLED_EXPERIMENTS += [
-    {
-        "model": model,
-        "name": f"{model}_{suffix}",
-        "class_id": 289,
-        "max_images": 1,
-        "batch_size": 1,
-        **kw,
-    }
-    for model in _FM_PLAIN_MODELS
-    for suffix, kw in _FM_INTERP_SPECS
 ]
 
 INTERPOLED_MODEL_KEYS = (
@@ -339,11 +338,11 @@ elif BACKBONE == "shared":
     RUNS = build_shared_runs(RUNS_SHARED)
 elif BACKBONE == "interpoled":
     OUT_DIR = OUT_DIR_INTERPOLED
-    # Random-init probes first, then pretrained shared, then interpoled sweeps.
+    # Interpoled sweeps first (plain swin → …), then random-init, then shared.
     RUNS = (
-        list(RUNS_RANDOM_INIT)
+        build_interpoled_runs(INTERPOLED_EXPERIMENTS)
+        + list(RUNS_RANDOM_INIT)
         + build_shared_runs(RUNS_SHARED)
-        + build_interpoled_runs(INTERPOLED_EXPERIMENTS)
     )
 else:
     raise ValueError(
