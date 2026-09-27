@@ -125,16 +125,16 @@ RUNS_SHARED: list[dict] = [
     # Baseline D=9 ES=1 ± ignore (Euler).
     {"name": "convnext_shared_baseline_D9_ES1_c289_n1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 0, "method": None, **_SHARED},
     {"name": "convnext_shared_baseline_D9_ES1_c289_n1_ignore1", "D": 9, "euler_step": 1.0, "fps": 1, "ignore_top_k_channels": 1, "method": None, **_SHARED},
-    # R100-style refined / large-step Euler.
-    {"name": "convnext_shared_D100_ES0.01_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
-    {"name": "convnext_shared_D100_ES0.01_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
+    # Refined / large-step Euler. Refined uses ES=9/D so T=D·ES=9 matches train (D=9, ES=1).
+    {"name": "convnext_shared_D100_ES0.09_c289_n1", "D": 100, "euler_step": 9 / 100, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
+    {"name": "convnext_shared_D100_ES0.09_c289_n1_ignore1", "D": 100, "euler_step": 9 / 100, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
     {"name": "convnext_shared_D100_ES0.1_c289_n1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
     {"name": "convnext_shared_D100_ES0.1_c289_n1_ignore1", "D": 100, "euler_step": 0.1, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
     {"name": "convnext_shared_D100_ES1_c289_n1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 0, "method": None, **_SHARED},
     {"name": "convnext_shared_D100_ES1_c289_n1_ignore1", "D": 100, "euler_step": 1.0, "fps": 80, "ignore_top_k_channels": 1, "method": None, **_SHARED},
-    # RK4 probe at refined step (vs Euler D100 ES=0.01).
-    {"name": "convnext_shared_D100_ES0.01_RK4_c289_n1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 0, "method": "RK4", **_SHARED},
-    {"name": "convnext_shared_D100_ES0.01_RK4_c289_n1_ignore1", "D": 100, "euler_step": 0.01, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_SHARED},
+    # RK4 probe at horizon-preserving refined step (vs Euler D100 ES=9/100).
+    {"name": "convnext_shared_D100_ES0.09_RK4_c289_n1", "D": 100, "euler_step": 9 / 100, "fps": 80, "ignore_top_k_channels": 0, "method": "RK4", **_SHARED},
+    {"name": "convnext_shared_D100_ES0.09_RK4_c289_n1_ignore1", "D": 100, "euler_step": 9 / 100, "fps": 80, "ignore_top_k_channels": 1, "method": "RK4", **_SHARED},
 ]
 
 # Interpoled: bilinear θ first (swin → … → convnext), then RK4 probes,

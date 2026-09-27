@@ -75,26 +75,27 @@ def build_configurations(
     n_blocks: int,
     tail: list[int],
 ) -> list[tuple[str, CustomForwardConfig | None]]:
-    """Active shared grid aligned with interpoled RK interpolation scripts.
+    """Active shared grid: refine depth while keeping train horizon T=9.
 
-    D applications of the shared residual with ES=1/D × RK1/2/4, plus the same
-    extras (D10 ES=0.1 all RKs; D10/D100 ES=1 Euler-only).
+    Shared was trained at D=9, ES=1 ⇒ T=D·ES=9. Depth-D runs therefore use
+    ES=9/D × RK1/2/4, plus extras (D10/D100 at ES=9/D all RKs; D10/D100 ES=1
+    Euler-only) and the native D9 ES=1 baseline.
     """
     repeats = [1, 2, 4, 8, 16, 32, 64, 128]
     methods = ["RK1", "RK2", "RK4"]
     configs: list[tuple[str, CustomForwardConfig | None]] = []
     for d in repeats:
         for method in methods:
-            es = 1 / d
+            es = 9 / d
             name = f"D{d}_ES{es:g}_{method}"
             configs.append((name, cfg(tail, [0] * d, euler_step=es, method=method)))
     for method in methods:
         configs.append(
-            (f"D10_ES0.1_{method}", cfg(tail, [0] * 10, euler_step=0.1, method=method))
+            (f"D10_ES0.9_{method}", cfg(tail, [0] * 10, euler_step=9 / 10, method=method))
         )
     for method in methods:
         configs.append(
-            (f"D100_ES0.01_{method}", cfg(tail, [0] * 100, euler_step=0.01, method=method))
+            (f"D100_ES0.09_{method}", cfg(tail, [0] * 100, euler_step=9 / 100, method=method))
         )
     configs.append(("D10_ES1_RK1", cfg(tail, [0] * 10, euler_step=1.0, method="RK1")))
     configs.append(("D100_ES1_RK1", cfg(tail, [0] * 100, euler_step=1.0, method="RK1")))
