@@ -22,6 +22,7 @@ Or locally:
   python scripts/feature_map_explorer.py --only resnet50_baseline_R1_ES1_c289_n1
   python scripts/feature_map_explorer.py --only convnext_shared_baseline_D9_ES1_c289_n1
   python scripts/feature_map_explorer.py --force   # overwrite existing figures / recompute
+  python scripts/feature_map_explorer.py --metrics-only  # refresh metrics/ (re-integrate if needed)
 """
 
 from __future__ import annotations
@@ -379,6 +380,8 @@ SAVE_TENSORS = True
 # Skip writing an artifact when a non-empty file already exists (use --force to overwrite).
 SKIP_EXISTING_FIGURES = True
 FORCE_RECOMPUTE = False
+# --metrics-only: refresh metrics/ (+ trajectory if cache lacks new columns); skip videos/scatters.
+METRICS_ONLY = False
 GRID_MAX_FRAMES = 36
 SCATTER_MAX_POINTS = 8000
 # None = all channels in static scatter; int = that channel only.
@@ -850,6 +853,31 @@ def _r1_group_boundaries(block_schedule: list[int], D: int) -> tuple[set[int], s
     return starts, ends
 
 
+def _inter_block_mask(block_schedule: list[int], D: int) -> np.ndarray:
+    """True at pair index d when h_d → h_{d+1} crosses residual-block groups."""
+    if len(block_schedule) != D:
+        raise ValueError(f"block_schedule length {len(block_schedule)} != D={D}")
+    mask = np.zeros(D, dtype=bool)
+    for d in range(D - 1):
+        if block_schedule[d] != block_schedule[d + 1]:
+            mask[d] = True
+    return mask
+
+
+def _nan_inter_block(values, is_inter_block) -> np.ndarray:
+    """Copy series with inter-block transitions set to NaN (drops the spike from the scale)."""
+    mask = np.asarray(is_inter_block, dtype=bool)
+    out = np.asarray(values, dtype=float)
+    if out.ndim == 0:
+        out = np.full(mask.shape, float(out))
+    else:
+        out = out.copy()
+    if mask.shape != out.shape:
+        raise ValueError(f"is_inter_block shape {mask.shape} != values shape {out.shape}")
+    out[mask] = np.nan
+    return out
+
+
 @torch.no_grad()
 def trajectory_stats(
     enter_fn,
@@ -895,9 +923,12 @@ def trajectory_stats(
     cos_x_flat_i = torch.zeros(n, D, dtype=torch.float64)
     cos_x_spatial_i = torch.zeros(n, D, dtype=torch.float64)
     omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES flat
+    # Acceleration: ||h_{d+1}-h_d||_F / ES  (h is ODE velocity = Δx/ES).
+    acc_h_i = torch.zeros(n, D, dtype=torch.float64)
     align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
     dist_x_r1_i = torch.zeros(n, D, dtype=torch.float64)  # ||x_n - x_R1|| after step d
     dist_x_r1_rel_i = torch.zeros(n, D, dtype=torch.float64)  # / ||x_R1||
+    inter_block = _inter_block_mask(schedule, D)
     rect_L_i = torch.zeros(n, dtype=torch.float64)
     rect_N_i = torch.zeros(n, dtype=torch.float64)
     rect_R_i = torch.zeros(n, dtype=torch.float64)
@@ -990,6 +1021,10 @@ def trajectory_stats(
             cos_hh = F.cosine_similarity(h_flat, h_next_flat, dim=1).clamp(-1.0, 1.0)
             cos_flat_i[start : start + bsz, d] = (1.0 - cos_hh).double().cpu()
             omega_i[start : start + bsz, d] = torch.arccos(cos_hh).double().cpu() / max(es, 1e-12)
+            # a ≈ dh/dt: Frobenius ||h_{d+1}-h_d|| / ES (same /ES as ω).
+            acc_h_i[start : start + bsz, d] = (
+                (h_next_flat - h_flat).norm(dim=1).double().cpu() / max(es, 1e-12)
+            )
             cos_x_flat_i[start : start + bsz, d] = (
                 1.0 - F.cosine_similarity(x_flat, x_next_flat, dim=1)
             ).double().cpu()
@@ -1045,6 +1080,7 @@ def trajectory_stats(
     omega_spatial_mean, omega_spatial_std = mean_std(omega_spatial_i)
     omega_channel_mean, omega_channel_std = mean_std(omega_channel_i)
     omega_mean, omega_std = mean_std(omega_i)
+    acc_h_mean, acc_h_std = mean_std(acc_h_i)
     align_mean, align_std = mean_std(align_h0_i)
     dist_r1_mean, dist_r1_std = mean_std(dist_x_r1_i)
     dist_r1_rel_mean, dist_r1_rel_std = mean_std(dist_x_r1_rel_i)
@@ -1083,6 +1119,9 @@ def trajectory_stats(
             "omega_h_channel_std": omega_channel_std,
             "omega_h": omega_mean,
             "omega_h_std": omega_std,
+            "acc_h": acc_h_mean,
+            "acc_h_std": acc_h_std,
+            "is_inter_block": inter_block.astype(np.int8),
             "cos_dist_x": mean_std(cos_x_flat_i)[0],
             "cos_dist_x_spatial": mean_std(cos_x_spatial_i)[0],
             "dist_x_r1": dist_r1_mean,
@@ -1222,12 +1261,16 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
     omega_spatial = []
     omega_channel = []
     omega = []
+    acc_h = []
     cos_x = []
     cos_x_spatial = []
     for d in range(D):
         c = F.cosine_similarity(mean_h[d].flatten(), mean_h[d + 1].flatten(), dim=0).clamp(-1, 1)
         cos_h.append((1 - c).item())
         omega.append((torch.arccos(c) / max(es, 1e-12)).item())
+        acc_h.append(
+            ((mean_h[d + 1] - mean_h[d]).flatten().norm() / max(es, 1e-12)).item()
+        )
         cos_x.append(
             (1 - F.cosine_similarity(mean_x[d].flatten(), mean_x[d + 1].flatten(), dim=0)).item()
         )
@@ -1255,6 +1298,9 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "omega_h_channel_std": 0.0,
             "omega_h": omega,
             "omega_h_std": 0.0,
+            "acc_h": acc_h,
+            "acc_h_std": 0.0,
+            "is_inter_block": np.zeros(D, dtype=np.int8),
             "cos_dist_x": cos_x,
             "cos_dist_x_spatial": cos_x_spatial,
         }
@@ -1737,9 +1783,18 @@ def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
         "PR_depth_on_mean_traj": cfg.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": cfg.get("PR_spatial_on_mean_traj"),
     }
-    # New R1-distance columns require a trajectory pass; stale caches must recompute.
-    if "dist_x_r1" not in res["pairs"].columns:
+    # New pair columns require a trajectory pass; stale caches must recompute.
+    if "dist_x_r1" not in res["pairs"].columns or "acc_h" not in res["pairs"].columns:
         return None
+    if "is_inter_block" not in res["pairs"].columns:
+        # Derive from saved block schedule when possible (shared → all zeros).
+        blocks = list(res.get("blocks") or [])
+        D = int(res["D"])
+        schedule = blocks if blocks else [0] * D
+        if len(schedule) != D:
+            return None
+        res["pairs"] = res["pairs"].copy()
+        res["pairs"]["is_inter_block"] = _inter_block_mask(schedule, D).astype(np.int8)
     scalars_path = run_dir / "table_scalars.csv"
     if scalars_path.is_file():
         res["scalars"] = pd.read_csv(scalars_path)
@@ -1747,94 +1802,162 @@ def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
 
 
 def _plot_mean_std(ax, x, mean, std, *, label: str, **plot_kw):
-    mean = np.asarray(mean)
-    std = np.asarray(std)
+    mean = np.asarray(mean, dtype=float)
+    std = np.asarray(std, dtype=float)
     ax.plot(x, mean, marker="o", ms=3, label=label, **plot_kw)
     ax.fill_between(x, mean - std, mean + std, alpha=0.25)
 
 
-def save_metric_plots(res: dict, run_dir: Path) -> None:
-    out = run_dir / "metrics.png"
-    if not should_write(out):
-        print(f"  skip existing {out.name}")
-        return
+def _metric_panel_specs(res: dict) -> list[dict]:
+    """Ordered metric panels: each has ``name``, ``draw(ax)``, and optional ``skip``."""
     norms, pairs = res["norms"], res["pairs"]
     es = res["euler_step"]
     label = f"{res['name']} (D={res['D']}, n={res['n_images']})"
     t_state = norms["t"]
     t_pair = pairs["t"] if "t" in pairs.columns else pairs["d"] * es
     has_r1 = "dist_x_r1" in pairs.columns
+    has_acc = "acc_h" in pairs.columns
+    is_ib = (
+        pairs["is_inter_block"].to_numpy(dtype=bool)
+        if "is_inter_block" in pairs.columns
+        else np.zeros(len(pairs), dtype=bool)
+    )
 
-    nrows = 3 if has_r1 else 2
-    fig, axes = plt.subplots(nrows, 2, figsize=(12, 4 * nrows), layout="constrained")
+    def draw_field_norm(ax):
+        _plot_mean_std(
+            ax, t_state, norms["norm_h"], norms.get("norm_h_std", 0.0), label=r"$\|h_d\|$"
+        )
+        _plot_mean_std(
+            ax,
+            t_state,
+            norms["norm_h_over_norm_x"],
+            norms.get("norm_h_over_norm_x_std", 0.0),
+            label=r"$\|h_d\| / \|x_d\|$",
+        )
+        ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($h=\Delta x/\mathrm{ES}$)")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
 
-    # (0,0) ||h|| and ||h||/||x||  (h = Δx/ES)
-    ax = axes[0, 0]
-    _plot_mean_std(
-        ax, t_state, norms["norm_h"], norms.get("norm_h_std", 0.0), label=r"$\|h_d\|$"
-    )
-    _plot_mean_std(
-        ax,
-        t_state,
-        norms["norm_h_over_norm_x"],
-        norms.get("norm_h_over_norm_x_std", 0.0),
-        label=r"$\|h_d\| / \|x_d\|$",
-    )
-    ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($h=\Delta x/\mathrm{ES}$)")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    def draw_omega(ax):
+        _plot_mean_std(
+            ax, t_pair, pairs["omega_h"], pairs.get("omega_h_std", 0.0), label=label
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\omega$ [rad / t]",
+            title=r"angular speed  $\arccos(\cos(h_d,h_{d+1}))/\mathrm{ES}$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
 
-    # (0,1) angular velocity from flattened cos
-    ax = axes[0, 1]
-    _plot_mean_std(
-        ax, t_pair, pairs["omega_h"], pairs.get("omega_h_std", 0.0), label=label
-    )
-    ax.set(
-        xlabel="t",
-        ylabel=r"$\omega$ [rad / t]",
-        title=r"angular speed  $\arccos(\cos(h_d,h_{d+1}))/\mathrm{ES}$",
-    )
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    def draw_acc(ax):
+        if not has_acc:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "acc_h missing — re-run trajectory", ha="center", va="center")
+            return
+        _plot_mean_std(
+            ax, t_pair, pairs["acc_h"], pairs.get("acc_h_std", 0.0), label=label
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\|a\|$ [1 / t]",
+            title=r"acceleration  $\|h_{d+1}-h_d\|_F/\mathrm{ES}$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
 
-    # (1,0) alignment with h_0
-    ax = axes[1, 0]
-    _plot_mean_std(
-        ax, t_state, norms["cos_h0_hd"], norms.get("cos_h0_hd_std", 0.0), label=label
-    )
-    ax.axhline(0.0, color="0.7", lw=1, zorder=0)
-    ax.set_ylim(-1.05, 1.05)
-    ax.set(xlabel="t", ylabel=r"$\cos(h_0, h_d)$", title="alignment with initial residual")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    def draw_omega_no_ib(ax):
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block(pairs["omega_h"], is_ib),
+            _nan_inter_block(pairs.get("omega_h_std", 0.0), is_ib),
+            label=label,
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\omega$ [rad / t]",
+            title=r"angular speed (no inter-block)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
 
-    # (1,1) mean angular speed: per-location (C-vec) and per-channel (HW-vec)
-    ax = axes[1, 1]
-    _plot_mean_std(
-        ax,
-        t_pair,
-        pairs["omega_h_spatial"],
-        pairs.get("omega_h_spatial_std", 0.0),
-        label=r"per-location $\mathrm{mean}_{i,j}\,\omega$",
-    )
-    _plot_mean_std(
-        ax,
-        t_pair,
-        pairs["omega_h_channel"],
-        pairs.get("omega_h_channel_std", 0.0),
-        label=r"per-channel $\mathrm{mean}_c\,\omega$",
-    )
-    ax.set(
-        xlabel="t",
-        ylabel=r"$\omega$ [rad / t]",
-        title=r"mean angular speed (spatial / channel)",
-    )
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    def draw_acc_no_ib(ax):
+        if not has_acc:
+            ax.set_axis_off()
+            return
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block(pairs["acc_h"], is_ib),
+            _nan_inter_block(pairs.get("acc_h_std", 0.0), is_ib),
+            label=label,
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\|a\|$ [1 / t]",
+            title=r"acceleration (no inter-block)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
 
-    # (2,*) distance of multi-step x to parallel R1 trajectory (per residual group)
-    if has_r1:
-        ax = axes[2, 0]
+    def draw_omega_spatial_no_ib(ax):
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block(pairs["omega_h_spatial"], is_ib),
+            _nan_inter_block(pairs.get("omega_h_spatial_std", 0.0), is_ib),
+            label=r"per-location $\mathrm{mean}_{i,j}\,\omega$",
+        )
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block(pairs["omega_h_channel"], is_ib),
+            _nan_inter_block(pairs.get("omega_h_channel_std", 0.0), is_ib),
+            label=r"per-channel $\mathrm{mean}_c\,\omega$",
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\omega$ [rad / t]",
+            title=r"mean angular speed (spatial / channel, no inter-block)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_alignment(ax):
+        _plot_mean_std(
+            ax, t_state, norms["cos_h0_hd"], norms.get("cos_h0_hd_std", 0.0), label=label
+        )
+        ax.axhline(0.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set(xlabel="t", ylabel=r"$\cos(h_0, h_d)$", title="alignment with initial residual")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_omega_spatial(ax):
+        _plot_mean_std(
+            ax,
+            t_pair,
+            pairs["omega_h_spatial"],
+            pairs.get("omega_h_spatial_std", 0.0),
+            label=r"per-location $\mathrm{mean}_{i,j}\,\omega$",
+        )
+        _plot_mean_std(
+            ax,
+            t_pair,
+            pairs["omega_h_channel"],
+            pairs.get("omega_h_channel_std", 0.0),
+            label=r"per-channel $\mathrm{mean}_c\,\omega$",
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\omega$ [rad / t]",
+            title=r"mean angular speed (spatial / channel)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_dist_r1(ax):
         _plot_mean_std(
             ax,
             t_pair,
@@ -1850,7 +1973,7 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
 
-        ax = axes[2, 1]
+    def draw_dist_r1_rel(ax):
         _plot_mean_std(
             ax,
             t_pair,
@@ -1865,12 +1988,71 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
         )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
-    else:
-        print("  note: dist_x_r1 missing from cache — re-run with --force to compute R1 distance")
 
+    panels = [
+        {"name": "field_norm", "draw": draw_field_norm},
+        {"name": "angular_speed", "draw": draw_omega},
+        {"name": "acceleration", "draw": draw_acc},
+        {"name": "angular_speed_no_interblock", "draw": draw_omega_no_ib},
+        {"name": "acceleration_no_interblock", "draw": draw_acc_no_ib},
+        {"name": "angular_speed_spatial_channel_no_interblock", "draw": draw_omega_spatial_no_ib},
+        {"name": "alignment_h0", "draw": draw_alignment},
+        {"name": "angular_speed_spatial_channel", "draw": draw_omega_spatial},
+    ]
+    if has_r1:
+        panels.append({"name": "dist_x_r1", "draw": draw_dist_r1})
+        panels.append({"name": "dist_x_r1_rel", "draw": draw_dist_r1_rel})
+    return panels
+
+
+def _save_metric_csvs(res: dict, metrics_dir: Path) -> None:
+    """Write depth-aligned CSVs: state (D+1), pair (D), and optional per-image scalars."""
+    norms = res["norms"].copy()
+    pairs = res["pairs"].copy()
+    norms.to_csv(metrics_dir / "metrics_state.csv", index=False)
+    pairs.to_csv(metrics_dir / "metrics_pair.csv", index=False)
+    # Convenience alias: pair series hold most dynamics metrics (ω, a, R1 distance).
+    pairs.to_csv(metrics_dir / "metrics.csv", index=False)
+    if "scalars" in res and res["scalars"] is not None:
+        res["scalars"].to_csv(metrics_dir / "metrics_scalars.csv", index=False)
+
+
+def save_metric_plots(res: dict, run_dir: Path) -> None:
+    """Write ``run_dir/metrics/``: combined grid, per-panel PNGs, and metric CSVs."""
+    metrics_dir = run_dir / "metrics"
+    out = metrics_dir / "metrics.png"
+    # Always refresh under --metrics-only / --force; otherwise respect SKIP_EXISTING.
+    if not (METRICS_ONLY or FORCE_RECOMPUTE) and not should_write(out):
+        print(f"  skip existing metrics/")
+        return
+
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    panels = _metric_panel_specs(res)
+    n = len(panels)
+    nrows = (n + 1) // 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(12, 3.4 * nrows), layout="constrained")
+    axes_flat = np.atleast_1d(axes).ravel()
+    for i, panel in enumerate(panels):
+        panel["draw"](axes_flat[i])
+    for j in range(n, len(axes_flat)):
+        axes_flat[j].set_axis_off()
     fig.savefig(out, dpi=140)
     plt.close(fig)
 
+    for panel in panels:
+        path = metrics_dir / f"{panel['name']}.png"
+        fig_i, ax_i = plt.subplots(figsize=(6.5, 3.8), layout="constrained")
+        panel["draw"](ax_i)
+        fig_i.savefig(path, dpi=140)
+        plt.close(fig_i)
+
+    _save_metric_csvs(res, metrics_dir)
+    # Legacy root copy for older notebooks / jobs that look for metrics.png here.
+    legacy = run_dir / "metrics.png"
+    if METRICS_ONLY or FORCE_RECOMPUTE or should_write(legacy):
+        shutil.copy2(out, legacy)
+
+    print(f"  metrics/ → {n} panels + metrics.png + CSVs")
     corr = res.get("cos_flat_spatial_corr", float("nan"))
     print(f"  corr(flat ω, spatial ω) = {corr:.6f}")
     print(
@@ -2818,6 +3000,26 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
 
     save_tables_and_config(res, class_names, run_dir)
     save_metric_plots(res, run_dir)
+    if METRICS_ONLY:
+        print("  --metrics-only: skipping videos / static scatters")
+        print(f"done -> {run_dir}")
+        light = {
+            "name": res["name"],
+            "model": model_key,
+            "D": res["D"],
+            "blocks": blocks,
+            "overlay_label": overlay_label,
+            "euler_step": res["euler_step"],
+            "n_images": res["n_images"],
+            "run_dir": str(run_dir),
+            "map_shape": tuple(res["mean_x"].shape[1:]),
+        }
+        del res
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        return light
+
     write_videos(res, channels, run_dir)
 
     # Static overlays (always). Animations are gated by VIDEO_MAPS via write_videos.
@@ -2964,12 +3166,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite existing figures and recompute trajectories (ignore mean_maps.pt cache)",
     )
+    p.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help=(
+            "Only refresh metrics/ (plots + CSVs). Skips videos/scatters. "
+            "Re-integrates the trajectory when the cache lacks new metric columns "
+            "(acc_h, dist_x_r1); use --force to always re-integrate."
+        ),
+    )
     p.add_argument("--keep-frames", action="store_true", help="Keep PNG frame directories")
     return p.parse_args()
 
 
 def main() -> None:
-    global KEEP_FRAMES, FORCE_RECOMPUTE, OUT_DIR_SHARED, OUT_DIR_INTERPOLED, OUT_DIR
+    global KEEP_FRAMES, FORCE_RECOMPUTE, METRICS_ONLY, OUT_DIR_SHARED, OUT_DIR_INTERPOLED, OUT_DIR
     load_dotenv(_REPO_ROOT / ".env")
     # Re-resolve after dotenv / job exports (WORK, FEATURE_MAP_ROOT).
     root = _feature_map_root()
@@ -2985,6 +3196,9 @@ def main() -> None:
     if args.force:
         FORCE_RECOMPUTE = True
         print("FORCE_RECOMPUTE: overwriting existing figures / ignoring trajectory cache")
+    if args.metrics_only:
+        METRICS_ONLY = True
+        print("METRICS_ONLY: refresh metrics/ only (skip videos / static scatters)")
 
     OUT_DIR_SHARED.mkdir(parents=True, exist_ok=True)
     OUT_DIR_INTERPOLED.mkdir(parents=True, exist_ok=True)
@@ -3064,7 +3278,7 @@ def main() -> None:
         model_key = spec.get("model") or _SHARED_MODEL_KEY
         completed.append(run_one(models[model_key], dataset, class_names, spec))
 
-    if SCATTER_OVERLAY_BY_D and completed:
+    if SCATTER_OVERLAY_BY_D and completed and not METRICS_ONLY:
         by_key: dict[tuple, list[dict]] = {}
         for res in completed:
             key = (res.get("model"), tuple(res.get("map_shape") or ()), res["n_images"])

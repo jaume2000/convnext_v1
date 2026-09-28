@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=feature_maps
-#SBATCH --time=08:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 # 1 GPU ≈ 1/4 Leonardo booster node → 8 cores (32 forces a full idle node).
@@ -27,6 +27,8 @@
 #   TRAIN_ARGS='--list-only'
 #   TRAIN_ARGS='--only convnext_shared_rand_D9_ES1_ls1_c289_n1'
 #   TRAIN_ARGS='--skip-existing'
+#   TRAIN_ARGS='--metrics-only'          # refresh metrics/ (+ traj if cache stale)
+#   TRAIN_ARGS='--metrics-only --force'  # always re-integrate, metrics only
 #   TRAIN_ARGS='--keep-frames'
 #   FEATURE_MAP_ROOT=/custom/path
 
