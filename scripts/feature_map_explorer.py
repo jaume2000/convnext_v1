@@ -878,6 +878,81 @@ def _nan_inter_block(values, is_inter_block) -> np.ndarray:
     return out
 
 
+def _nan_inter_block_alpha(values, is_inter_block) -> np.ndarray:
+    """NaN angular acceleration where either consecutive pair crosses a block boundary.
+
+    ``alpha[d]`` compares accelerations ``a_d=h_{d+1}-h_d`` and ``a_{d+1}``, so drop when
+    pair ``d`` or ``d+1`` is inter-block.
+    """
+    mask = np.asarray(is_inter_block, dtype=bool)
+    out = np.asarray(values, dtype=float).copy()
+    if mask.shape[0] != out.shape[0]:
+        raise ValueError(f"is_inter_block length {mask.shape[0]} != values length {out.shape[0]}")
+    drop = mask.copy()
+    if len(drop) >= 2:
+        drop[:-1] |= mask[1:]
+    out[drop] = np.nan
+    return out
+
+
+def _angular_accel_from_h_seq(h_seq: torch.Tensor, *, euler_step: float) -> np.ndarray:
+    """Angular acceleration along a mean field trajectory.
+
+    ``h_seq`` is ``(D+1, …)``. For pair index ``d`` (``0..D-2``):
+      ``a_d = h_{d+1}-h_d``, ``α_d = arccos(⟨â_d, â_{d+1}⟩) / ES``
+    with unit vectors ``â``. Last entry is NaN (needs two consecutive accelerations).
+    """
+    D = int(h_seq.shape[0]) - 1
+    es = max(float(euler_step), 1e-12)
+    alpha = np.full(D, np.nan, dtype=float)
+    if D < 2:
+        return alpha
+    flat = h_seq.reshape(D + 1, -1)
+    prev_a = None
+    for d in range(D):
+        a = flat[d + 1] - flat[d]
+        if prev_a is not None:
+            cos = F.cosine_similarity(prev_a.unsqueeze(0), a.unsqueeze(0), dim=1).clamp(-1.0, 1.0)
+            alpha[d - 1] = float(torch.arccos(cos).item() / es)
+        prev_a = a
+    return alpha
+
+
+def enrich_mean_field_metrics(res: dict) -> None:
+    """Add ``||mean(x)||``, ``||mean(h)||``, ``||mean(h)_{d+1}-mean(h)_d||/ES``, angular accel.
+
+    Uses cached ``mean_x`` / ``mean_h`` so ``--metrics-only`` refreshes without re-integrating.
+    Mutates ``res['norms']`` and ``res['pairs']`` in place.
+    """
+    mean_x = res["mean_x"]
+    mean_h = res["mean_h"]
+    es = float(res["euler_step"])
+    norms = res["norms"].copy()
+    pairs = res["pairs"].copy()
+
+    norms["norm_mean_x"] = mean_x.flatten(1).norm(dim=1).numpy()
+    norms["norm_mean_h"] = mean_h.flatten(1).norm(dim=1).numpy()
+
+    D = int(mean_h.shape[0]) - 1
+    acc_mean = np.array(
+        [
+            ((mean_h[d + 1] - mean_h[d]).flatten().norm() / max(es, 1e-12)).item()
+            for d in range(D)
+        ],
+        dtype=float,
+    )
+    pairs["acc_mean_h"] = acc_mean
+    # Prefer per-image α when present; otherwise derive from the mean field path.
+    if "alpha_h" not in pairs.columns:
+        pairs["alpha_h"] = _angular_accel_from_h_seq(mean_h, euler_step=es)
+        pairs["alpha_h_std"] = 0.0
+    elif "alpha_h_std" not in pairs.columns:
+        pairs["alpha_h_std"] = 0.0
+
+    res["norms"] = norms
+    res["pairs"] = pairs
+
+
 @torch.no_grad()
 def trajectory_stats(
     enter_fn,
@@ -889,12 +964,16 @@ def trajectory_stats(
     batch_size,
     dataset,
     block_schedule: list[int] | None = None,
+    zero_channels_after_step: list[int] | None = None,
 ):
     """Integrate a sequence of residual fields and collect per-image dynamics + mean maps.
 
     ``enter_fn(batch)`` returns the stage-3 state in NCHW. ``field_blocks[d]`` is the
     residual module at step d (``forward`` returns ``x + f(x)``). Shared mode passes
     the same block D times; interpoled mode passes the scheduled stage-3 residuals.
+
+    ``zero_channels_after_step``: if set, those channel indices are forced to 0 on the
+    state ``x`` after every residual RK step (and on the parallel R1 reference path).
 
     Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
     i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
@@ -925,6 +1004,9 @@ def trajectory_stats(
     omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES flat
     # Acceleration: ||h_{d+1}-h_d||_F / ES  (h is ODE velocity = Δx/ES).
     acc_h_i = torch.zeros(n, D, dtype=torch.float64)
+    # Angular acceleration: arccos(⟨â_d, â_{d+1}⟩)/ES with â = unit(h_{·+1}-h_·).
+    # Stored at pair index d for d=0..D-2; last column stays 0 / NaN after mean.
+    alpha_h_i = torch.full((n, D), float("nan"), dtype=torch.float64)
     align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
     dist_x_r1_i = torch.zeros(n, D, dtype=torch.float64)  # ||x_n - x_R1|| after step d
     dist_x_r1_rel_i = torch.zeros(n, D, dtype=torch.float64)  # / ||x_R1||
@@ -935,11 +1017,22 @@ def trajectory_stats(
     pr_depth_i = torch.zeros(n, dtype=torch.float64)
     pr_spatial_i = torch.zeros(n, dtype=torch.float64)
 
+    zero_chs = [int(c) for c in (zero_channels_after_step or [])]
+
     def field_at(block):
         def f(y):
             return block(y) - y
 
         return f
+
+    def _zero_channels_(t: torch.Tensor) -> torch.Tensor:
+        if not zero_chs:
+            return t
+        t = t.clone()
+        # Index with a Python int (not a list) so zero_ mutates ``t``, not a copy.
+        for c in zero_chs:
+            t[:, c].zero_()
+        return t
 
     def load_batch(idxs: list[int]) -> torch.Tensor:
         return torch.stack([dataset[i][0] for i in idxs])
@@ -968,6 +1061,7 @@ def trajectory_stats(
         h0_flat = h.flatten(1).detach()
         H_rows: list[torch.Tensor] = []
         path_len = torch.zeros(bsz, dtype=torch.float64, device=device)
+        prev_a_flat: torch.Tensor | None = None
 
         for d in range(D + 1):
             # At state d, evaluate the field of the block that acts at this index
@@ -1000,11 +1094,11 @@ def trajectory_stats(
             if d in group_starts:
                 f_r1 = field_at(field_blocks[d])
                 h_r1 = f_r1(x_r1)
-                x_r1_ref = rk_step(f_r1, x_r1, euler_step, method, k1=h_r1)
+                x_r1_ref = _zero_channels_(rk_step(f_r1, x_r1, euler_step, method, k1=h_r1))
 
             # Transition d → d+1 uses field_blocks[d] (h already matches for Euler).
             f_step = field_at(field_blocks[d])
-            x_next = rk_step(f_step, x, euler_step, method, k1=h)
+            x_next = _zero_channels_(rk_step(f_step, x, euler_step, method, k1=h))
             h_next = field_at(field_blocks[min(d + 1, D - 1)])(x_next)
             h_next_flat = h_next.flatten(1)
             x_next_flat = x_next.flatten(1)
@@ -1022,9 +1116,15 @@ def trajectory_stats(
             cos_flat_i[start : start + bsz, d] = (1.0 - cos_hh).double().cpu()
             omega_i[start : start + bsz, d] = torch.arccos(cos_hh).double().cpu() / max(es, 1e-12)
             # a ≈ dh/dt: Frobenius ||h_{d+1}-h_d|| / ES (same /ES as ω).
-            acc_h_i[start : start + bsz, d] = (
-                (h_next_flat - h_flat).norm(dim=1).double().cpu() / max(es, 1e-12)
-            )
+            a_flat = h_next_flat - h_flat
+            acc_h_i[start : start + bsz, d] = a_flat.norm(dim=1).double().cpu() / max(es, 1e-12)
+            # α ≈ dθ/dt of consecutive accelerations (unit vectors of a_d, a_{d+1}).
+            if prev_a_flat is not None:
+                cos_aa = F.cosine_similarity(prev_a_flat, a_flat, dim=1).clamp(-1.0, 1.0)
+                alpha_h_i[start : start + bsz, d - 1] = (
+                    torch.arccos(cos_aa).double().cpu() / max(es, 1e-12)
+                )
+            prev_a_flat = a_flat.detach()
             cos_x_flat_i[start : start + bsz, d] = (
                 1.0 - F.cosine_similarity(x_flat, x_next_flat, dim=1)
             ).double().cpu()
@@ -1081,6 +1181,9 @@ def trajectory_stats(
     omega_channel_mean, omega_channel_std = mean_std(omega_channel_i)
     omega_mean, omega_std = mean_std(omega_i)
     acc_h_mean, acc_h_std = mean_std(acc_h_i)
+    # nanmean over images for α (last column is all-NaN by construction).
+    alpha_h_mean = np.nanmean(alpha_h_i.numpy(), axis=0)
+    alpha_h_std = np.nanstd(alpha_h_i.numpy(), axis=0)
     align_mean, align_std = mean_std(align_h0_i)
     dist_r1_mean, dist_r1_std = mean_std(dist_x_r1_i)
     dist_r1_rel_mean, dist_r1_rel_std = mean_std(dist_x_r1_rel_i)
@@ -1121,6 +1224,8 @@ def trajectory_stats(
             "omega_h_std": omega_std,
             "acc_h": acc_h_mean,
             "acc_h_std": acc_h_std,
+            "alpha_h": alpha_h_mean,
+            "alpha_h_std": alpha_h_std,
             "is_inter_block": inter_block.astype(np.int8),
             "cos_dist_x": mean_std(cos_x_flat_i)[0],
             "cos_dist_x_spatial": mean_std(cos_x_spatial_i)[0],
@@ -1250,6 +1355,8 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "norm_h_std": 0.0,
             "norm_x": norm_x.numpy(),
             "norm_x_std": 0.0,
+            "norm_mean_x": norm_x.numpy(),
+            "norm_mean_h": norm_h.numpy(),
             "norm_h_over_norm_x": (norm_h / norm_x.clamp_min(1e-30)).numpy(),
             "norm_h_over_norm_x_std": 0.0,
             "cos_h0_hd": align.numpy(),
@@ -1285,6 +1392,7 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
         omega_spatial.append(loc_omega.mean().item())
         omega_channel.append(ch_omega.mean().item())
         cos_x_spatial.append(loc_x.mean().item())
+    alpha_h = _angular_accel_from_h_seq(mean_h, euler_step=es)
     pairs = pd.DataFrame(
         {
             "d": list(range(D)),
@@ -1300,6 +1408,9 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "omega_h_std": 0.0,
             "acc_h": acc_h,
             "acc_h_std": 0.0,
+            "acc_mean_h": acc_h,
+            "alpha_h": alpha_h,
+            "alpha_h_std": 0.0,
             "is_inter_block": np.zeros(D, dtype=np.int8),
             "cos_dist_x": cos_x,
             "cos_dist_x_spatial": cos_x_spatial,
@@ -1677,6 +1788,7 @@ def save_inputs(spec: dict, dataset, class_names: list[str], run_dir: Path) -> N
 
 def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> None:
     spec = res["spec"]
+    enrich_mean_field_metrics(res)
     res["norms"].to_csv(run_dir / "table_norms.csv", index=False)
     res["pairs"].to_csv(run_dir / "table_pairs.csv", index=False)
     if "scalars" in res:
@@ -1817,16 +1929,50 @@ def _metric_panel_specs(res: dict) -> list[dict]:
     t_pair = pairs["t"] if "t" in pairs.columns else pairs["d"] * es
     has_r1 = "dist_x_r1" in pairs.columns
     has_acc = "acc_h" in pairs.columns
+    has_acc_mean = "acc_mean_h" in pairs.columns
+    has_alpha = "alpha_h" in pairs.columns
+    has_norm_mean_x = "norm_mean_x" in norms.columns
+    has_norm_mean_h = "norm_mean_h" in norms.columns
+    has_cos_x = "cos_dist_x" in pairs.columns
     is_ib = (
         pairs["is_inter_block"].to_numpy(dtype=bool)
         if "is_inter_block" in pairs.columns
         else np.zeros(len(pairs), dtype=bool)
     )
 
+    def draw_state_norm(ax):
+        _plot_mean_std(
+            ax, t_state, norms["norm_x"], norms.get("norm_x_std", 0.0), label=r"$\mathrm{mean}\,\|x_d\|$"
+        )
+        if has_norm_mean_x:
+            ax.plot(
+                t_state,
+                norms["norm_mean_x"],
+                marker="s",
+                ms=3,
+                label=r"$\|\mathrm{mean}(x_d)\|$",
+            )
+        ax.set(xlabel="t = d · ES", ylabel="norm", title=r"state norm $\|x\|$")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
     def draw_field_norm(ax):
         _plot_mean_std(
-            ax, t_state, norms["norm_h"], norms.get("norm_h_std", 0.0), label=r"$\|h_d\|$"
+            ax, t_state, norms["norm_h"], norms.get("norm_h_std", 0.0), label=r"$\mathrm{mean}\,\|h_d\|$"
         )
+        if has_norm_mean_h:
+            ax.plot(
+                t_state,
+                norms["norm_mean_h"],
+                marker="s",
+                ms=3,
+                label=r"$\|\mathrm{mean}(h_d)\|$",
+            )
+        ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field / velocity ($h=\Delta x/\mathrm{ES}$)")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_field_over_state(ax):
         _plot_mean_std(
             ax,
             t_state,
@@ -1834,7 +1980,54 @@ def _metric_panel_specs(res: dict) -> list[dict]:
             norms.get("norm_h_over_norm_x_std", 0.0),
             label=r"$\|h_d\| / \|x_d\|$",
         )
-        ax.set(xlabel="t = d · ES", ylabel="norm", title=r"field norm ($h=\Delta x/\mathrm{ES}$)")
+        ax.set(
+            xlabel="t = d · ES",
+            ylabel=r"$\|h\| / \|x\|$",
+            title=r"relative field norm $\|h_d\| / \|x_d\|$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_cos_x(ax):
+        if not has_cos_x:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "cos_dist_x missing — re-run trajectory", ha="center", va="center")
+            return
+        # Stored as cosine distance 1 - cos; plot similarity cos(x_d, x_{d+1}).
+        cos_sim = 1.0 - np.asarray(pairs["cos_dist_x"], dtype=float)
+        _plot_mean_std(ax, t_pair, cos_sim, 0.0, label=r"$\cos(x_d, x_{d+1})$")
+        if "cos_dist_x_spatial" in pairs.columns:
+            cos_sp = 1.0 - np.asarray(pairs["cos_dist_x_spatial"], dtype=float)
+            ax.plot(t_pair, cos_sp, marker="s", ms=3, label=r"$\mathrm{mean}_{i,j}\,\cos(x_d, x_{d+1})$")
+        ax.axhline(1.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos$",
+            title=r"state cosine similarity $\cos(x_d, x_{d+1})$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_cos_x_no_ib(ax):
+        if not has_cos_x:
+            ax.set_axis_off()
+            return
+        cos_sim = 1.0 - np.asarray(pairs["cos_dist_x"], dtype=float)
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block(cos_sim, is_ib),
+            0.0,
+            label=r"$\cos(x_d, x_{d+1})$",
+        )
+        ax.axhline(1.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos$",
+            title=r"state cosine similarity (no inter-block)",
+        )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
 
@@ -1856,8 +2049,20 @@ def _metric_panel_specs(res: dict) -> list[dict]:
             ax.text(0.5, 0.5, "acc_h missing — re-run trajectory", ha="center", va="center")
             return
         _plot_mean_std(
-            ax, t_pair, pairs["acc_h"], pairs.get("acc_h_std", 0.0), label=label
+            ax,
+            t_pair,
+            pairs["acc_h"],
+            pairs.get("acc_h_std", 0.0),
+            label=r"$\mathrm{mean}\,\|h_{d+1}-h_d\|/\mathrm{ES}$",
         )
+        if has_acc_mean:
+            ax.plot(
+                t_pair,
+                pairs["acc_mean_h"],
+                marker="s",
+                ms=3,
+                label=r"$\|\mathrm{mean}(h)_{d+1}-\mathrm{mean}(h)_d\|/\mathrm{ES}$",
+            )
         ax.set(
             xlabel="t",
             ylabel=r"$\|a\|$ [1 / t]",
@@ -1891,12 +2096,59 @@ def _metric_panel_specs(res: dict) -> list[dict]:
             t_pair,
             _nan_inter_block(pairs["acc_h"], is_ib),
             _nan_inter_block(pairs.get("acc_h_std", 0.0), is_ib),
-            label=label,
+            label=r"$\mathrm{mean}\,\|h_{d+1}-h_d\|/\mathrm{ES}$",
         )
+        if has_acc_mean:
+            ax.plot(
+                t_pair,
+                _nan_inter_block(pairs["acc_mean_h"], is_ib),
+                marker="s",
+                ms=3,
+                label=r"$\|\mathrm{mean}(h)_{d+1}-\mathrm{mean}(h)_d\|/\mathrm{ES}$",
+            )
         ax.set(
             xlabel="t",
             ylabel=r"$\|a\|$ [1 / t]",
             title=r"acceleration (no inter-block)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_alpha(ax):
+        if not has_alpha:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "alpha_h missing", ha="center", va="center")
+            return
+        _plot_mean_std(
+            ax,
+            t_pair,
+            pairs["alpha_h"],
+            pairs.get("alpha_h_std", 0.0),
+            label=label,
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\alpha$ [rad / t]",
+            title=r"angular accel  $\arccos(\langle\hat a_d,\hat a_{d+1}\rangle)/\mathrm{ES}$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_alpha_no_ib(ax):
+        if not has_alpha:
+            ax.set_axis_off()
+            return
+        _plot_mean_std(
+            ax,
+            t_pair,
+            _nan_inter_block_alpha(pairs["alpha_h"], is_ib),
+            _nan_inter_block_alpha(pairs.get("alpha_h_std", 0.0), is_ib),
+            label=label,
+        )
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\alpha$ [rad / t]",
+            title=r"angular accel (no inter-block)",
         )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
@@ -1990,11 +2242,17 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         ax.legend(fontsize=8)
 
     panels = [
+        {"name": "state_norm", "draw": draw_state_norm},
         {"name": "field_norm", "draw": draw_field_norm},
+        {"name": "field_over_state", "draw": draw_field_over_state},
+        {"name": "cos_x", "draw": draw_cos_x},
+        {"name": "cos_x_no_interblock", "draw": draw_cos_x_no_ib},
         {"name": "angular_speed", "draw": draw_omega},
         {"name": "acceleration", "draw": draw_acc},
+        {"name": "angular_acceleration", "draw": draw_alpha},
         {"name": "angular_speed_no_interblock", "draw": draw_omega_no_ib},
         {"name": "acceleration_no_interblock", "draw": draw_acc_no_ib},
+        {"name": "angular_acceleration_no_interblock", "draw": draw_alpha_no_ib},
         {"name": "angular_speed_spatial_channel_no_interblock", "draw": draw_omega_spatial_no_ib},
         {"name": "alignment_h0", "draw": draw_alignment},
         {"name": "angular_speed_spatial_channel", "draw": draw_omega_spatial},
@@ -2025,6 +2283,8 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
     if not (METRICS_ONLY or FORCE_RECOMPUTE) and not should_write(out):
         print(f"  skip existing metrics/")
         return
+
+    enrich_mean_field_metrics(res)
 
     metrics_dir.mkdir(parents=True, exist_ok=True)
     panels = _metric_panel_specs(res)
