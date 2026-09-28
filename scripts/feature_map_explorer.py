@@ -919,9 +919,9 @@ def _angular_accel_from_h_seq(h_seq: torch.Tensor, *, euler_step: float) -> np.n
 
 
 def enrich_mean_field_metrics(res: dict) -> None:
-    """Add ``||mean(x)||``, ``||mean(h)||``, ``||mean(h)_{d+1}-mean(h)_d||/ES``, angular accel.
+    """Add mean-traj norms/alignments and fill missing columns from ``mean_x`` / ``mean_h``.
 
-    Uses cached ``mean_x`` / ``mean_h`` so ``--metrics-only`` refreshes without re-integrating.
+    Uses cached maps so ``--metrics-only`` refreshes without re-integrating.
     Mutates ``res['norms']`` and ``res['pairs']`` in place.
     """
     mean_x = res["mean_x"]
@@ -929,11 +929,47 @@ def enrich_mean_field_metrics(res: dict) -> None:
     es = float(res["euler_step"])
     norms = res["norms"].copy()
     pairs = res["pairs"].copy()
+    D = int(mean_h.shape[0]) - 1
 
     norms["norm_mean_x"] = mean_x.flatten(1).norm(dim=1).numpy()
     norms["norm_mean_h"] = mean_h.flatten(1).norm(dim=1).numpy()
 
-    D = int(mean_h.shape[0]) - 1
+    # cos(x_d, h_d) and cos(x_0, x_d) on the mean trajectory if missing (old caches).
+    if "cos_x_h" not in norms.columns:
+        cos_xh = [
+            float(
+                F.cosine_similarity(mean_x[d].flatten(), mean_h[d].flatten(), dim=0)
+                .clamp(-1.0, 1.0)
+                .item()
+            )
+            for d in range(D + 1)
+        ]
+        norms["cos_x_h"] = cos_xh
+        norms["cos_x_h_std"] = 0.0
+    if "cos_x0_xd" not in norms.columns:
+        x0 = mean_x[0].flatten()
+        cos_x0 = [
+            float(F.cosine_similarity(x0, mean_x[d].flatten(), dim=0).clamp(-1.0, 1.0).item())
+            for d in range(D + 1)
+        ]
+        norms["cos_x0_xd"] = cos_x0
+        norms["cos_x0_xd_std"] = 0.0
+
+    # Cross-image variance from std columns when present; else zeros (n=1 / mean-only).
+    for mean_col, var_col, std_col in (
+        ("norm_x", "var_norm_x", "norm_x_std"),
+        ("norm_h", "var_norm_h", "norm_h_std"),
+        ("norm_h_over_norm_x", "var_norm_h_over_norm_x", "norm_h_over_norm_x_std"),
+        ("cos_x_h", "var_cos_x_h", "cos_x_h_std"),
+        ("cos_x0_xd", "var_cos_x0_xd", "cos_x0_xd_std"),
+        ("cos_h0_hd", "var_cos_h0_hd", "cos_h0_hd_std"),
+    ):
+        if var_col not in norms.columns:
+            if std_col in norms.columns:
+                norms[var_col] = np.asarray(norms[std_col], dtype=float) ** 2
+            else:
+                norms[var_col] = 0.0
+
     acc_mean = np.array(
         [
             ((mean_h[d + 1] - mean_h[d]).flatten().norm() / max(es, 1e-12)).item()
@@ -1008,6 +1044,8 @@ def trajectory_stats(
     # Stored at pair index d for d=0..D-2; last column stays 0 / NaN after mean.
     alpha_h_i = torch.full((n, D), float("nan"), dtype=torch.float64)
     align_h0_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(h_0, h_d)
+    cos_x_h_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(x_d, h_d)
+    cos_x0_xd_i = torch.zeros(n, D + 1, dtype=torch.float64)  # cos(x_0, x_d)
     dist_x_r1_i = torch.zeros(n, D, dtype=torch.float64)  # ||x_n - x_R1|| after step d
     dist_x_r1_rel_i = torch.zeros(n, D, dtype=torch.float64)  # / ||x_R1||
     inter_block = _inter_block_mask(schedule, D)
@@ -1056,6 +1094,7 @@ def trajectory_stats(
         f0 = field_at(field_blocks[0])
         h = f0(x)
         x0 = x.detach()
+        x0_flat = x0.flatten(1)
         x_r1 = x  # parallel R1 path (one step per residual group)
         x_r1_ref = None  # R1 state after one step of the current group
         h0_flat = h.flatten(1).detach()
@@ -1082,6 +1121,8 @@ def trajectory_stats(
             norm_h_i[start : start + bsz, d] = n_h.double().cpu()
             norm_x_i[start : start + bsz, d] = n_x.double().cpu()
             align_h0_i[start : start + bsz, d] = F.cosine_similarity(h0_flat, h_flat, dim=1).double().cpu()
+            cos_x_h_i[start : start + bsz, d] = F.cosine_similarity(x_flat, h_flat, dim=1).double().cpu()
+            cos_x0_xd_i[start : start + bsz, d] = F.cosine_similarity(x0_flat, x_flat, dim=1).double().cpu()
             H_rows.append(h_flat.detach().cpu())
             # Path length L = sum ||Δx_d|| = ES * sum ||h_d||.
             if d < D:
@@ -1185,6 +1226,8 @@ def trajectory_stats(
     alpha_h_mean = np.nanmean(alpha_h_i.numpy(), axis=0)
     alpha_h_std = np.nanstd(alpha_h_i.numpy(), axis=0)
     align_mean, align_std = mean_std(align_h0_i)
+    cos_x_h_mean, cos_x_h_std = mean_std(cos_x_h_i)
+    cos_x0_xd_mean, cos_x0_xd_std = mean_std(cos_x0_xd_i)
     dist_r1_mean, dist_r1_std = mean_std(dist_x_r1_i)
     dist_r1_rel_mean, dist_r1_rel_std = mean_std(dist_x_r1_rel_i)
 
@@ -1206,6 +1249,17 @@ def trajectory_stats(
             "norm_h_over_norm_x_std": norm_h_over_x_std,
             "cos_h0_hd": align_mean,
             "cos_h0_hd_std": align_std,
+            "cos_x_h": cos_x_h_mean,
+            "cos_x_h_std": cos_x_h_std,
+            "cos_x0_xd": cos_x0_xd_mean,
+            "cos_x0_xd_std": cos_x0_xd_std,
+            # Variance across images (std²); zero when n=1.
+            "var_norm_x": norm_x_std**2,
+            "var_norm_h": norm_h_std**2,
+            "var_norm_h_over_norm_x": norm_h_over_x_std**2,
+            "var_cos_x_h": cos_x_h_std**2,
+            "var_cos_x0_xd": cos_x0_xd_std**2,
+            "var_cos_h0_hd": align_std**2,
         }
     )
 
@@ -1347,6 +1401,16 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
     align = torch.stack(
         [F.cosine_similarity(mean_h[0].flatten(), mean_h[d].flatten(), dim=0) for d in range(D + 1)]
     )
+    cos_x_h = torch.stack(
+        [
+            F.cosine_similarity(mean_x[d].flatten(), mean_h[d].flatten(), dim=0).clamp(-1.0, 1.0)
+            for d in range(D + 1)
+        ]
+    )
+    x0f = mean_x[0].flatten()
+    cos_x0_xd = torch.stack(
+        [F.cosine_similarity(x0f, mean_x[d].flatten(), dim=0).clamp(-1.0, 1.0) for d in range(D + 1)]
+    )
     norms = pd.DataFrame(
         {
             "d": depths.numpy(),
@@ -1361,6 +1425,16 @@ def tables_from_means(mean_x: torch.Tensor, mean_h: torch.Tensor, *, euler_step:
             "norm_h_over_norm_x_std": 0.0,
             "cos_h0_hd": align.numpy(),
             "cos_h0_hd_std": 0.0,
+            "cos_x_h": cos_x_h.numpy(),
+            "cos_x_h_std": 0.0,
+            "cos_x0_xd": cos_x0_xd.numpy(),
+            "cos_x0_xd_std": 0.0,
+            "var_norm_x": 0.0,
+            "var_norm_h": 0.0,
+            "var_norm_h_over_norm_x": 0.0,
+            "var_cos_x_h": 0.0,
+            "var_cos_x0_xd": 0.0,
+            "var_cos_h0_hd": 0.0,
         }
     )
 
@@ -2182,9 +2256,85 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         )
         ax.axhline(0.0, color="0.7", lw=1, zorder=0)
         ax.set_ylim(-1.05, 1.05)
-        ax.set(xlabel="t", ylabel=r"$\cos(h_0, h_d)$", title="alignment with initial residual")
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos(h_0, h_d)$",
+            title=r"field alignment vs start  $\cos(h_0, h_d)$",
+        )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
+
+    def draw_cos_state_vs_field(ax):
+        if "cos_x_h" not in norms.columns:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "cos_x_h missing", ha="center", va="center")
+            return
+        _plot_mean_std(
+            ax,
+            t_state,
+            norms["cos_x_h"],
+            norms.get("cos_x_h_std", 0.0),
+            label=r"$\cos(x_d, h_d)$",
+        )
+        ax.axhline(0.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos(x, h)$",
+            title=r"state vs field  $\cos(x_d, h_d)$  (radial if $\approx\pm1$)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_cos_state_vs_initial(ax):
+        if "cos_x0_xd" not in norms.columns:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "cos_x0_xd missing", ha="center", va="center")
+            return
+        _plot_mean_std(
+            ax,
+            t_state,
+            norms["cos_x0_xd"],
+            norms.get("cos_x0_xd_std", 0.0),
+            label=r"$\cos(x_0, x_d)$",
+        )
+        ax.axhline(0.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos(x_0, x_d)$",
+            title=r"state alignment vs start  $\cos(x_0, x_d)$",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_variance_across_images(ax):
+        """Cross-image variance (needs n>1; flat zero for single-image runs)."""
+        series = [
+            ("var_norm_x", r"$\mathrm{Var}(\|x\|)$"),
+            ("var_norm_h", r"$\mathrm{Var}(\|h\|)$"),
+            ("var_norm_h_over_norm_x", r"$\mathrm{Var}(\|h\|/\|x\|)$"),
+            ("var_cos_x_h", r"$\mathrm{Var}(\cos(x,h))$"),
+            ("var_cos_x0_xd", r"$\mathrm{Var}(\cos(x_0,x_d))$"),
+            ("var_cos_h0_hd", r"$\mathrm{Var}(\cos(h_0,h_d))$"),
+        ]
+        plotted = False
+        for col, lab in series:
+            if col not in norms.columns:
+                continue
+            ax.plot(t_state, norms[col], marker="o", ms=3, label=lab)
+            plotted = True
+        if not plotted:
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "variance columns missing", ha="center", va="center")
+            return
+        ax.set(
+            xlabel="t",
+            ylabel="variance across images",
+            title=r"cross-image variance (0 if $n=1$)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
 
     def draw_omega_spatial(ax):
         _plot_mean_std(
@@ -2245,8 +2395,12 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         {"name": "state_norm", "draw": draw_state_norm},
         {"name": "field_norm", "draw": draw_field_norm},
         {"name": "field_over_state", "draw": draw_field_over_state},
-        {"name": "cos_x", "draw": draw_cos_x},
-        {"name": "cos_x_no_interblock", "draw": draw_cos_x_no_ib},
+        {"name": "cos_consecutive_states", "draw": draw_cos_x},
+        {"name": "cos_consecutive_states_no_interblock", "draw": draw_cos_x_no_ib},
+        {"name": "cos_state_vs_field", "draw": draw_cos_state_vs_field},
+        {"name": "cos_state_vs_initial", "draw": draw_cos_state_vs_initial},
+        {"name": "field_alignment_vs_start", "draw": draw_alignment},
+        {"name": "variance_across_images", "draw": draw_variance_across_images},
         {"name": "angular_speed", "draw": draw_omega},
         {"name": "acceleration", "draw": draw_acc},
         {"name": "angular_acceleration", "draw": draw_alpha},
@@ -2254,12 +2408,11 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         {"name": "acceleration_no_interblock", "draw": draw_acc_no_ib},
         {"name": "angular_acceleration_no_interblock", "draw": draw_alpha_no_ib},
         {"name": "angular_speed_spatial_channel_no_interblock", "draw": draw_omega_spatial_no_ib},
-        {"name": "alignment_h0", "draw": draw_alignment},
         {"name": "angular_speed_spatial_channel", "draw": draw_omega_spatial},
     ]
     if has_r1:
-        panels.append({"name": "dist_x_r1", "draw": draw_dist_r1})
-        panels.append({"name": "dist_x_r1_rel", "draw": draw_dist_r1_rel})
+        panels.append({"name": "dist_to_parallel_R1", "draw": draw_dist_r1})
+        panels.append({"name": "dist_to_parallel_R1_relative", "draw": draw_dist_r1_rel})
     return panels
 
 
