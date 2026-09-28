@@ -3,8 +3,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# Booster nodes are 32 cores / 4 GPUs; request 16 so each of 4 ranks gets ~4
-# dataloader workers (see available_cpus() in the train script).
+# boost_qos_lprod: 2 GPUs. 16 CPUs so each of 2 ranks gets ~8 dataloader workers
+# (see available_cpus() in the train script). Must match NPROC_PER_NODE below.
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
 #SBATCH --partition=boost_usr_prod
@@ -96,7 +96,7 @@ EXPERIMENT_NAME="convnextv1_deltav0_imagenet_wu5_e100_lr1e-4"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
 RETAKE="${RETAKE:-0}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-scripts/train_convnextv1_deltav0_imagenet_e100_lr1e-4.py}"
 
 # Both checks run before the ~150G of staging below, so a missing file costs seconds
