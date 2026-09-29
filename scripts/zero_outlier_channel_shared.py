@@ -50,6 +50,7 @@ from scripts.feature_map_explorer import (
     load_shared_convnext,
     save_metric_plots,
     save_tables_and_config,
+    shared_r1_groups,
     trajectory_stats,
 )
 from scripts.shared_convnext_interpolation import N_BLOCKS, last_metric, make_config
@@ -214,6 +215,8 @@ def run_feature_maps(
         dataset=dataset,
         block_schedule=[0] * D,
         zero_channels_after_step=channels,
+        r1_groups=shared_r1_groups(D, euler_step, N_BLOCKS),
+        r1_blocks=[model.deltifiedStage3[0]] * N_BLOCKS,
     )
     res["name"] = name
     res["spec"] = {

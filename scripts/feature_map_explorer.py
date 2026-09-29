@@ -401,6 +401,8 @@ SPAGHETTI_SEED = 0
 # Delete PNG frame dirs after the video is written (saves a lot of disk).
 KEEP_FRAMES = True
 MEAN_MAPS_NAME = "mean_maps.pt"
+# Bump when the R1-reference semantics change so stale caches re-integrate.
+R1_REF_VERSION = 2
 FIGSIZE, DPI = (4.4, 4.2), 100
 # C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
 CH_PX_PER_CELL = 8
@@ -832,11 +834,30 @@ def svd_participation_ratio(matrix: torch.Tensor) -> float:
     return participation_ratio(s)
 
 
+def shared_r1_groups(D: int, euler_step: float, n_blocks: int = 9) -> list[int]:
+    """Index of the D=n_blocks (ES=1) reference step that each shared micro-step refines.
+
+    Micro-step d covers t ∈ [d·ES, (d+1)·ES); reference step k covers [k, k+1).
+    Steps past the train horizon T=n_blocks stay attached to the last reference step.
+    """
+    return [min(int(d * float(euler_step) + 1e-9), n_blocks - 1) for d in range(D)]
+
+
+def interpoled_r1_groups(
+    blocks: list[int], n_blocks: int, euler_step: float, weight_interpolation: str
+) -> list[int]:
+    """Native stage-3 block index that each micro-step refines (R1 reference target)."""
+    if weight_interpolation == "bilinear":
+        return [k for k, _ in bilinear_time_steps(n_blocks, len(blocks), euler_step)]
+    return list(blocks)
+
+
 def _r1_group_boundaries(block_schedule: list[int], D: int) -> tuple[set[int], set[int]]:
     """Run-length groups of equal schedule ids → step indices that start / end a group.
 
     Within each group the multi-step path applies the same residual R times while a
-    parallel R1 path applies it once; after the group, R1 continues from its own state.
+    parallel R1 path applies it once with ES=1; after the group, R1 continues from its
+    own state.
     """
     if len(block_schedule) != D:
         raise ValueError(f"block_schedule length {len(block_schedule)} != D={D}")
@@ -1001,6 +1022,8 @@ def trajectory_stats(
     dataset,
     block_schedule: list[int] | None = None,
     zero_channels_after_step: list[int] | None = None,
+    r1_groups: list[int] | None = None,
+    r1_blocks: list[nn.Module] | None = None,
 ):
     """Integrate a sequence of residual fields and collect per-image dynamics + mean maps.
 
@@ -1014,9 +1037,15 @@ def trajectory_stats(
     Naming: h := block(x) - x = Δx / ES (ODE field). Discrete step: Δx = ES · h,
     i.e. x ← x + ES · h. Stored mean_h is this h (not Δx).
 
-    ``block_schedule`` (length D) groups consecutive equal ids into residual "blocks".
-    A parallel R1 trajectory takes one step per group; after each multi-step micro-step
-    we record ||x^{(n)} - x_{R1}|| (and the relative distance).
+    ``block_schedule`` (length D) groups consecutive equal ids into residual "blocks";
+    it only drives the inter-block mask (where the field changes).
+
+    R1 reference: the normal network (each native block applied once, Euler ES=1, i.e.
+    ``x ← block(x)``) runs on its own trajectory. ``r1_groups[d]`` is the index of the
+    reference block that micro-step d refines and ``r1_blocks[k]`` its module. After each
+    micro-step we record ||x^{(n)} - x_{R1,k+1}|| (and the relative distance), so at the
+    last micro-step of group k the fine path should land on the R1 output of block k.
+    Defaults: ``r1_groups = block_schedule``, reference module = ``field_blocks[d]``.
     """
     method = method.upper() if isinstance(method, str) else method
     D = len(field_blocks)
@@ -1027,7 +1056,10 @@ def trajectory_stats(
     es = float(euler_step)
     mean_x = mean_h = cos_map_h = cos_map_x = norm_map_h = l2_map_h = None
     schedule = list(block_schedule) if block_schedule is not None else [0] * D
-    group_starts, group_ends = _r1_group_boundaries(schedule, D)
+    r1_ids = list(r1_groups) if r1_groups is not None else schedule
+    if len(r1_ids) != D:
+        raise ValueError(f"r1_groups length {len(r1_ids)} != D={D}")
+    group_starts, group_ends = _r1_group_boundaries(r1_ids, D)
 
     # Per-image series (filled in index order).
     norm_h_i = torch.zeros(n, D + 1, dtype=torch.float64)
@@ -1124,18 +1156,14 @@ def trajectory_stats(
             cos_x_h_i[start : start + bsz, d] = F.cosine_similarity(x_flat, h_flat, dim=1).double().cpu()
             cos_x0_xd_i[start : start + bsz, d] = F.cosine_similarity(x0_flat, x_flat, dim=1).double().cpu()
             H_rows.append(h_flat.detach().cpu())
-            # Path length L = sum ||Δx_d|| = ES * sum ||h_d||.
-            if d < D:
-                path_len = path_len + es * n_h.double()
 
             if d == D:
                 break
 
-            # Start of a residual group: R1 takes one step from its own input.
+            # Start of a reference group: the normal network applies block k once.
             if d in group_starts:
-                f_r1 = field_at(field_blocks[d])
-                h_r1 = f_r1(x_r1)
-                x_r1_ref = _zero_channels_(rk_step(f_r1, x_r1, euler_step, method, k1=h_r1))
+                ref_block = r1_blocks[r1_ids[d]] if r1_blocks is not None else field_blocks[d]
+                x_r1_ref = _zero_channels_(ref_block(x_r1))
 
             # Transition d → d+1 uses field_blocks[d] (h already matches for Euler).
             f_step = field_at(field_blocks[d])
@@ -1143,8 +1171,10 @@ def trajectory_stats(
             h_next = field_at(field_blocks[min(d + 1, D - 1)])(x_next)
             h_next_flat = h_next.flatten(1)
             x_next_flat = x_next.flatten(1)
+            # Path length L = sum ||Δx_d|| (actual step, also valid for RK2–4).
+            path_len = path_len + (x_next_flat - x_flat).norm(dim=1).double()
 
-            # Distance of multi-step state after n steps of this block vs R1's one-step x.
+            # Distance of the fine state after n micro-steps vs R1's block-k output.
             assert x_r1_ref is not None
             dist = (x_next - x_r1_ref).flatten(1).norm(dim=1)
             rel = dist / x_r1_ref.flatten(1).norm(dim=1).clamp_min(1e-30)
@@ -1184,7 +1214,7 @@ def trajectory_stats(
             l2_map_h[d] += w * (h - h_next).norm(dim=1).sum(0)
             x, h = x_next, h_next
 
-        # Rectitude: L = ES * sum ||h_d||, N = ||x_D - x_0||, R = N/L.
+        # Rectitude: L = sum ||Δx_d||, N = ||x_D - x_0||, R = N/L.
         disp = (x - x0).flatten(1).norm(dim=1).double()
         rect_L_i[start : start + bsz] = path_len.cpu()
         rect_N_i[start : start + bsz] = disp.cpu()
@@ -1287,6 +1317,8 @@ def trajectory_stats(
             "dist_x_r1_std": dist_r1_std,
             "dist_x_r1_rel": dist_r1_rel_mean,
             "dist_x_r1_rel_std": dist_r1_rel_std,
+            "r1_block": np.asarray(r1_ids, dtype=np.int64),
+            "is_block_end": np.array([d in group_ends for d in range(D)], dtype=np.int8),
         }
     )
 
@@ -1310,6 +1342,7 @@ def trajectory_stats(
     return {
         "D": D,
         "euler_step": es,
+        "r1_ref_version": R1_REF_VERSION,
         "method": method,
         "n_images": n,
         "mean_x": mean_x.cpu(),
@@ -1874,6 +1907,7 @@ def save_tables_and_config(res: dict, class_names: list[str], run_dir: Path) -> 
         "D": res["D"],
         "blocks": list(res.get("blocks") or []),
         "euler_step": res["euler_step"],
+        "r1_ref_version": res.get("r1_ref_version", R1_REF_VERSION),
         "method": res["method"] or "RK1",
         "weight_interpolation": res.get("weight_interpolation", "plain"),
         "split": SPLIT,
@@ -1941,6 +1975,7 @@ def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
         "spec": spec,
         "D": int(cfg["D"]),
         "euler_step": float(cfg["euler_step"]),
+        "r1_ref_version": int(cfg.get("r1_ref_version", 0)),
         "method": cfg.get("method") or "RK1",
         "blocks": list(cfg.get("blocks") or []),
         "model": cfg.get("model"),
@@ -1969,8 +2004,10 @@ def load_cached_run(run_dir: Path, spec: dict) -> dict | None:
         "PR_depth_on_mean_traj": cfg.get("PR_depth_on_mean_traj"),
         "PR_spatial_on_mean_traj": cfg.get("PR_spatial_on_mean_traj"),
     }
-    # New pair columns require a trajectory pass; stale caches must recompute.
+    # New pair columns / R1-ref semantics require a trajectory pass; stale caches must recompute.
     if "dist_x_r1" not in res["pairs"].columns or "acc_h" not in res["pairs"].columns:
+        return None
+    if int(cfg.get("r1_ref_version", 0)) != R1_REF_VERSION:
         return None
     if "is_inter_block" not in res["pairs"].columns:
         # Derive from saved block schedule when possible (shared → all zeros).
@@ -2370,7 +2407,7 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         ax.set(
             xlabel="t",
             ylabel=r"$\|x^{(n)} - x_{\mathrm{R1}}\|$",
-            title="distance to parallel R1 (same block, one step)",
+            title=r"distance to parallel R1 (ES$=1$, one step / block)",
         )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
@@ -2386,7 +2423,20 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         ax.set(
             xlabel="t",
             ylabel="relative distance",
-            title="relative distance to parallel R1",
+            title=r"relative distance to parallel R1 (ES$=1$)",
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    has_block_end = has_r1 and "is_block_end" in pairs.columns and "r1_block" in pairs.columns
+
+    def draw_dist_r1_block_end(ax):
+        end = pairs[pairs["is_block_end"].astype(bool)]
+        ax.plot(end["r1_block"], end["dist_x_r1_rel"], marker="o", ms=4, label=label)
+        ax.set(
+            xlabel="reference block k",
+            ylabel=r"$\|x^{(\mathrm{end})} - x_{\mathrm{R1},k}\| / \|x_{\mathrm{R1},k}\|$",
+            title="relative distance to R1 at the end of each block",
         )
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
@@ -2413,6 +2463,8 @@ def _metric_panel_specs(res: dict) -> list[dict]:
     if has_r1:
         panels.append({"name": "dist_to_parallel_R1", "draw": draw_dist_r1})
         panels.append({"name": "dist_to_parallel_R1_relative", "draw": draw_dist_r1_rel})
+    if has_block_end:
+        panels.append({"name": "dist_to_R1_block_end", "draw": draw_dist_r1_block_end})
     return panels
 
 
@@ -3348,6 +3400,9 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             if step is None:
                 step = model.stage3_length / D
             field_blocks = [model.deltifiedStage3[0]] * D
+            n_ref = int(model.stage3_length)
+            r1_groups = shared_r1_groups(D, step, n_ref)
+            r1_blocks = [model.deltifiedStage3[0]] * n_ref
             blocks = None
             wi = "plain"
             model_key = spec.get("model") or _SHARED_MODEL_KEY
@@ -3371,6 +3426,8 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
                 weight_interpolation=wi,
             )
             D = len(field_blocks)
+            r1_groups = interpoled_r1_groups(blocks, n_blocks, step, wi)
+            r1_blocks = [_wrap_stage3_block(model_key, b) for b in stage3_raw_blocks(model_key, model)]
             overlay_label = name
             enter_fn = lambda batch, m=model, k=model_key: enter_stage3(k, m, batch)
             print(
@@ -3388,6 +3445,8 @@ def run_one(model, dataset, class_names: list[str], spec: dict) -> dict:
             batch_size=spec["batch_size"],
             dataset=dataset,
             block_schedule=blocks if blocks is not None else [0] * D,
+            r1_groups=r1_groups,
+            r1_blocks=r1_blocks,
         )
         res["name"] = name
         res["spec"] = spec
