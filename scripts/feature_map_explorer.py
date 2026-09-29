@@ -402,7 +402,7 @@ SPAGHETTI_SEED = 0
 KEEP_FRAMES = True
 MEAN_MAPS_NAME = "mean_maps.pt"
 # Bump when the R1-reference semantics change so stale caches re-integrate.
-R1_REF_VERSION = 2
+R1_REF_VERSION = 3
 FIGSIZE, DPI = (4.4, 4.2), 100
 # C×H frames: one square pixel block per (H, channel) cell — zoom to see vertical channels.
 CH_PX_PER_CELL = 8
@@ -1072,6 +1072,7 @@ def trajectory_stats(
     omega_i = torch.zeros(n, D, dtype=torch.float64)  # arccos(cos)/ES flat
     # Acceleration: ||h_{d+1}-h_d||_F / ES  (h is ODE velocity = Δx/ES).
     acc_h_i = torch.zeros(n, D, dtype=torch.float64)
+    cos_x_a_i = torch.zeros(n, D, dtype=torch.float64)  # cos(x_d, h_{d+1}-h_d)
     # Angular acceleration: arccos(⟨â_d, â_{d+1}⟩)/ES with â = unit(h_{·+1}-h_·).
     # Stored at pair index d for d=0..D-2; last column stays 0 / NaN after mean.
     alpha_h_i = torch.full((n, D), float("nan"), dtype=torch.float64)
@@ -1189,6 +1190,7 @@ def trajectory_stats(
             # a ≈ dh/dt: Frobenius ||h_{d+1}-h_d|| / ES (same /ES as ω).
             a_flat = h_next_flat - h_flat
             acc_h_i[start : start + bsz, d] = a_flat.norm(dim=1).double().cpu() / max(es, 1e-12)
+            cos_x_a_i[start : start + bsz, d] = F.cosine_similarity(x_flat, a_flat, dim=1).double().cpu()
             # α ≈ dθ/dt of consecutive accelerations (unit vectors of a_d, a_{d+1}).
             if prev_a_flat is not None:
                 cos_aa = F.cosine_similarity(prev_a_flat, a_flat, dim=1).clamp(-1.0, 1.0)
@@ -1252,6 +1254,7 @@ def trajectory_stats(
     omega_channel_mean, omega_channel_std = mean_std(omega_channel_i)
     omega_mean, omega_std = mean_std(omega_i)
     acc_h_mean, acc_h_std = mean_std(acc_h_i)
+    cos_x_a_mean, cos_x_a_std = mean_std(cos_x_a_i)
     # nanmean over images for α (last column is all-NaN by construction).
     alpha_h_mean = np.nanmean(alpha_h_i.numpy(), axis=0)
     alpha_h_std = np.nanstd(alpha_h_i.numpy(), axis=0)
@@ -1308,6 +1311,8 @@ def trajectory_stats(
             "omega_h_std": omega_std,
             "acc_h": acc_h_mean,
             "acc_h_std": acc_h_std,
+            "cos_x_a": cos_x_a_mean,
+            "cos_x_a_std": cos_x_a_std,
             "alpha_h": alpha_h_mean,
             "alpha_h_std": alpha_h_std,
             "is_inter_block": inter_block.astype(np.int8),
@@ -2323,6 +2328,32 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
 
+    has_cos_x_a = "cos_x_a" in pairs.columns
+
+    def _draw_cos_state_vs_acc(ax, *, drop_inter_block: bool):
+        mean = pairs["cos_x_a"]
+        std = pairs.get("cos_x_a_std", 0.0)
+        if drop_inter_block:
+            mean = _nan_inter_block(mean, is_ib)
+            std = _nan_inter_block(std, is_ib)
+        _plot_mean_std(ax, t_pair, mean, std, label=r"$\cos(x_d, h_{d+1}-h_d)$")
+        ax.axhline(0.0, color="0.7", lw=1, zorder=0)
+        ax.set_ylim(-1.05, 1.05)
+        suffix = " (no inter-block)" if drop_inter_block else ""
+        ax.set(
+            xlabel="t",
+            ylabel=r"$\cos(x, a)$",
+            title=r"state vs acceleration  $\cos(x_d, a_d)$" + suffix,
+        )
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    def draw_cos_state_vs_acc(ax):
+        _draw_cos_state_vs_acc(ax, drop_inter_block=False)
+
+    def draw_cos_state_vs_acc_no_ib(ax):
+        _draw_cos_state_vs_acc(ax, drop_inter_block=True)
+
     def draw_cos_state_vs_initial(ax):
         if "cos_x0_xd" not in norms.columns:
             ax.set_axis_off()
@@ -2465,6 +2496,11 @@ def _metric_panel_specs(res: dict) -> list[dict]:
         panels.append({"name": "dist_to_parallel_R1_relative", "draw": draw_dist_r1_rel})
     if has_block_end:
         panels.append({"name": "dist_to_R1_block_end", "draw": draw_dist_r1_block_end})
+    if has_cos_x_a:
+        panels.append({"name": "cos_state_vs_acceleration", "draw": draw_cos_state_vs_acc})
+        panels.append(
+            {"name": "cos_state_vs_acceleration_no_interblock", "draw": draw_cos_state_vs_acc_no_ib}
+        )
     return panels
 
 
@@ -2510,6 +2546,12 @@ def save_metric_plots(res: dict, run_dir: Path) -> None:
         panel["draw"](ax_i)
         fig_i.savefig(path, dpi=140)
         plt.close(fig_i)
+
+    keep = {f"{p['name']}.png" for p in panels} | {out.name}
+    for stale in metrics_dir.glob("*.png"):
+        if stale.name not in keep:
+            stale.unlink()
+            print(f"  removed stale {stale.name}")
 
     _save_metric_csvs(res, metrics_dir)
     # Legacy root copy for older notebooks / jobs that look for metrics.png here.
