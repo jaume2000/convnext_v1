@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=feature_maps
-#SBATCH --time=12:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 # 1 GPU ≈ 1/4 Leonardo booster node → 8 cores (32 forces a full idle node).
