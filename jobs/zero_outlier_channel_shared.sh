@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=zero_outlier_ch
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 # 1 GPU, 16 CPUs on Leonardo booster.
