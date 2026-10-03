@@ -26,15 +26,17 @@ import torch
 load_dotenv()
 # Fixed, not experiment_name(): .env points EXPERIMENT_NAME at the pretrained run, whose
 # last.pth this script reads, and the Trainer would overwrite it on the first epoch.
-EXPERIMENT_NAME = "convnextv1_deltav0_imagenet_wu10_e50_lr1e-3"
+EXPERIMENT_NAME = "convnextv1_deltav0_imagenet_wu5_e100_lr1e-4"
 EXPERIMENT_PATH = Path("outputs") / EXPERIMENT_NAME
 USE_DELTAS = True
 USE_DDP = True
-EPOCHS = 50
-WARMUP_EPOCHS = 10
-BATCH_SIZE = 256
+EPOCHS = 100
+WARMUP_EPOCHS = 5
+# Global batch, split across ranks: the run started on 2 GPUs × 256, so resuming on
+# 4 GPUs keeps the same optimisation recipe (and steps per epoch).
+GLOBAL_BATCH_SIZE = 512
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
-LR = 1e-3
+LR = 1e-4
 MIN_LR = 1e-7
 # Applied to conv/linear weights only, see build_param_groups.
 WEIGHT_DECAY = 0.05
@@ -63,6 +65,9 @@ def setup_ddp():
 
 
 local_rank, rank, world_size = setup_ddp() if USE_DDP else (0, 0, 1)
+if GLOBAL_BATCH_SIZE % world_size:
+    raise ValueError(f"GLOBAL_BATCH_SIZE={GLOBAL_BATCH_SIZE} not divisible by {world_size} ranks")
+BATCH_SIZE = GLOBAL_BATCH_SIZE // world_size
 use_ddp = USE_DDP and world_size > 1 and torch.cuda.is_available()
 
 if torch.cuda.is_available():

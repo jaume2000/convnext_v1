@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=convnextv1_deltav0_9to27
-#SBATCH --time=12:00:00
+# boost_qos_lprod walltime cap; unused time is not charged and RETAKE=1 chains further.
+#SBATCH --time=4-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# boost_qos_lprod: 2 GPUs. 16 CPUs so each of 2 ranks gets ~8 dataloader workers
+# Full booster node: 32 cores / 4 GPUs, so each of 4 ranks gets 8 dataloader workers
 # (see available_cpus() in the train script). Must match NPROC_PER_NODE below.
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/convnextv1_deltav0_9to27_imagenet_%j.out
@@ -19,7 +20,7 @@
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnextv1_deltav0_9to27_imagenet.sh
 #
-# Chain 12 h jobs after the first segment (or a time-limit kill):
+# Chain further jobs after the first segment (or a time-limit kill):
 #   echo 'RETAKE=1' >> .env   # or export RETAKE=1 for one submission
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnextv1_deltav0_9to27_imagenet.sh
 
@@ -100,7 +101,7 @@ fi
 EXPERIMENT_NAME="convnextv1_deltav0_9to27_imagenet"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 # Both checks run before the ~150G of staging below, so a missing file costs seconds
 # instead of the best part of an hour.

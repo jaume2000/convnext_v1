@@ -34,7 +34,9 @@ USE_DELTAS = True
 USE_DDP = True
 EPOCHS = 100
 WARMUP_EPOCHS = 0
-BATCH_SIZE = 256
+# Global batch, split across ranks: the run started on 2 GPUs × 256, so resuming on
+# 4 GPUs keeps the same optimisation recipe (and steps per epoch).
+GLOBAL_BATCH_SIZE = 512
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 1e-5
 MIN_LR = 1e-7
@@ -65,6 +67,9 @@ def setup_ddp():
 
 
 local_rank, rank, world_size = setup_ddp() if USE_DDP else (0, 0, 1)
+if GLOBAL_BATCH_SIZE % world_size:
+    raise ValueError(f"GLOBAL_BATCH_SIZE={GLOBAL_BATCH_SIZE} not divisible by {world_size} ranks")
+BATCH_SIZE = GLOBAL_BATCH_SIZE // world_size
 use_ddp = USE_DDP and world_size > 1 and torch.cuda.is_available()
 
 if torch.cuda.is_available():

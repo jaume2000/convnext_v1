@@ -1,24 +1,25 @@
 #!/bin/bash
 #SBATCH --job-name=convnextv1_deltav0
-#SBATCH --time=12:00:00
+# boost_qos_lprod walltime cap; unused time is not charged and RETAKE=1 chains further.
+#SBATCH --time=4-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# boost_qos_lprod: 2 GPUs. 16 CPUs so each of 2 ranks gets ~8 dataloader workers
+# Full booster node: 32 cores / 4 GPUs, so each of 4 ranks gets 8 dataloader workers
 # (see available_cpus() in the train script). Must match NPROC_PER_NODE below.
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:4
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/convnextv1_deltav0_imagenet_%j.out
 #SBATCH --error=logs/convnextv1_deltav0_imagenet_%j.err
 
 # Fine-tunes the shared ConvNeXt with zero-init deltas on the 9 stage3 blocks.
-# 100 epochs, lr 1e-5 cosine to 1e-7, warmup 0.
+# 100 epochs, lr 1e-4 cosine to 1e-7, warmup 5.
 #
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnextv1_deltav0_imagenet.sh
 #
-# Chain 12 h jobs after the first segment (or a time-limit kill):
+# Chain further jobs after the first segment (or a time-limit kill):
 #   echo 'RETAKE=1' >> .env   # or export RETAKE=1 for one submission
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/convnextv1_deltav0_imagenet.sh
 
@@ -97,10 +98,10 @@ fi
 # and the train script hardcodes its own name for the same reason (the Trainer would
 # otherwise write over the last.pth this job reads).
 # Must match EXPERIMENT_NAME in scripts/train_convnextv1_deltav0_imagenet.py.
-EXPERIMENT_NAME="convnextv1_deltav0_imagenet_wu10_e50_lr1e-3"
+EXPERIMENT_NAME="convnextv1_deltav0_imagenet_wu5_e100_lr1e-4"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 # Both checks run before the ~150G of staging below, so a missing file costs seconds
 # instead of the best part of an hour.

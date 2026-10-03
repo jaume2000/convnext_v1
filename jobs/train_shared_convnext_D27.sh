@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=shared_D27
-#SBATCH --time=12:00:00
+# boost_qos_lprod walltime cap; unused time is not charged and RETAKE=1 chains further.
+#SBATCH --time=4-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 # Booster nodes are 32 cores (1x Xeon 8358) / 4 GPUs, so the 4 ranks get 8 dataloader
@@ -17,7 +18,7 @@
 # Submit from the repo root:
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_shared_convnext_D27.sh
 #
-# Chain 12 h jobs after the first segment (or a time-limit kill):
+# Chain further jobs after the first segment (or a time-limit kill):
 #   echo 'RETAKE=1' >> .env   # or export RETAKE=1 for one submission
 #   source .env && sbatch --account="$SLURM_ACCOUNT" jobs/train_shared_convnext_D27.sh
 #
