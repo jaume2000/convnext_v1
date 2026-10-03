@@ -1,4 +1,15 @@
-"""Shared ConvNeXt custom_forward configuration sweep on ImageNet validation."""
+"""Shared ConvNeXt custom_forward configuration sweep on ImageNet validation.
+
+Rows are named ``D{D}_ES{ES}_T{T}_{method}`` (see ``build_configurations`` for the grid).
+Existing rows of ``results.csv`` are skipped (RESUME); older free-form labels are migrated.
+
+Leonardo:
+  source .env && sbatch --account="$SLURM_ACCOUNT" jobs/shared_convnext_ablation.sh
+
+Local:
+  python scripts/shared_convnext_ablation.py --list-only
+  python scripts/shared_convnext_ablation.py --batch-size 128 --num-workers 8 --only-section D
+"""
 
 from __future__ import annotations
 
@@ -30,8 +41,9 @@ BATCH_SIZE = 1024
 NUM_WORKERS = 16
 MAX_BATCHES: int | None = None  # set e.g. 2 for a quick smoke test
 AMP = False
-RESUME = False
+RESUME = True
 NUM_CLASSES = 1000
+TRAIN_HORIZON = 9.0  # shared was trained at D=9, ES=1
 
 
 def available_cpus() -> int:
@@ -46,7 +58,11 @@ def load_shared_convnext(checkpoint: Path) -> DeltaConvNext:
     model.rewire()
     ckpt = torch.load(checkpoint, map_location="cpu")
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model.load_state_dict(state_dict, strict=True)
+    # ``tail.*`` aliases the LN+downsample already stored under ``deltifiedStage3.*``.
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    stale = [k for k in missing if not k.startswith("tail.")]
+    if stale or unexpected:
+        raise RuntimeError(f"missing={stale} unexpected={unexpected}")
     epoch = ckpt.get("epoch") if isinstance(ckpt, dict) else None
     print(f"Loaded {checkpoint}" + (f" (epoch {epoch})" if epoch is not None else ""))
     return model
@@ -71,160 +87,87 @@ def shared_block_count(block_indices: list[int]) -> int:
     return len(block_indices) - 2
 
 
+def config_name(depth: int, euler_step: float, method: str | None) -> str:
+    """Canonical row name: D = shared applications, T = D·ES integration horizon."""
+    return f"D{depth}_ES{euler_step:.4g}_T{depth * euler_step:.4g}_{(method or 'RK1').upper()}"
+
+
 def build_configurations(
     n_blocks: int,
     tail: list[int],
 ) -> list[tuple[str, CustomForwardConfig | None]]:
-    """Active shared grid: refine depth while keeping train horizon T=9.
+    """Shared stage-3 grid (one block applied D times with step ES; horizon T = D·ES).
 
-    Shared was trained at D=9, ES=1 ⇒ T=D·ES=9. Depth-D runs therefore use
-    ES=9/D × RK1/2/4, plus extras (D10/D100 at ES=9/D all RKs; D10/D100 ES=1
-    Euler-only) and the native D9 ES=1 baseline.
+    Shared was trained at D=9, ES=1 ⇒ T=9. Sections:
+      A. refine at the train horizon: ES = 9/D, RK1/2/4
+      B. fixed ES=1 (horizon grows with depth)
+      C. native depth D=9, varying ES (coarse horizon sweep, step = ES)
+      D. fine horizon sweep: T varies at a small fixed step (Euler ES=0.1, RK4 ES=0.25),
+         separating the effect of T from discretization error
     """
-    repeats = [1, 2, 4, 8, 16, 32, 64, 128]
-    methods = ["RK1", "RK2", "RK4"]
     configs: list[tuple[str, CustomForwardConfig | None]] = []
-    for d in repeats:
-        for method in methods:
-            es = 9 / d
-            name = f"D{d}_ES{es:g}_{method}"
-            configs.append((name, cfg(tail, [0] * d, euler_step=es, method=method)))
-    for method in methods:
-        configs.append(
-            (f"D10_ES0.9_{method}", cfg(tail, [0] * 10, euler_step=9 / 10, method=method))
-        )
-    for method in methods:
-        configs.append(
-            (f"D100_ES0.09_{method}", cfg(tail, [0] * 100, euler_step=9 / 100, method=method))
-        )
-    configs.append(("D10_ES1_RK1", cfg(tail, [0] * 10, euler_step=1.0, method="RK1")))
-    configs.append(("D100_ES1_RK1", cfg(tail, [0] * 100, euler_step=1.0, method="RK1")))
-    # Native shared depth (9 residual apps) for direct baseline reference.
-    configs.append(("D9_ES1_RK1", cfg(tail, [0] * n_blocks, euler_step=1.0, method="RK1")))
+    seen: set[str] = set()
+
+    def add(depth: int, es: float, method: str = "RK1") -> None:
+        name = config_name(depth, es, method)
+        if name not in seen:
+            seen.add(name)
+            configs.append((name, cfg(tail, [0] * depth, euler_step=es, method=method)))
+
+    configs.append(("--- A. refine at T=9 (ES=9/D) ---", None))
+    depths_a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 18, 24, 32, 48, 64, 96, 100, 128, 256, 512, 1024]
+    for method in ("RK1", "RK2", "RK4"):
+        for d in depths_a:
+            add(d, TRAIN_HORIZON / d, method)
+    add(10000, TRAIN_HORIZON / 10000, "RK1")
+
+    configs.append(("--- B. fixed ES=1 (T=D) ---", None))
+    for d in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 18, 24, 32, 48, 64, 96, 100, 128, 256, 512, 1024, 10000]:
+        add(d, 1.0)
+
+    configs.append(("--- C. D=9, varying ES (T=9·ES) ---", None))
+    for es in [0.01, 0.0125, 0.025, 0.05, 0.1, 0.125, 0.2, 0.25, 0.4, 0.5, 9 / 11, 2.0, 1.8, 3.6, 4.0, 8.0, 16.0]:
+        add(n_blocks, es)
+
+    configs.append(("--- D. fine horizon sweep (T varies, small fixed step) ---", None))
+    horizons = [0.5, 1, 2, 3, 4.5, 6, 7, 8, 8.5, 9, 9.5, 10, 11, 12, 13.5, 18, 27, 36]
+    for method, es in (("RK1", 0.1), ("RK4", 0.25)):
+        for T in horizons:
+            add(round(T / es), es, method)
     return configs
 
 
-def build_configurations_old(
-    n_blocks: int,
-    tail: list[int],
-) -> list[tuple[str, CustomForwardConfig | None]]:
-    """Previous large ablation sweep (kept for reference; not used by main)."""
-    return [
-        ("-----------------", None),
-        ("baseline (forward)", cfg(tail, list(range(n_blocks)))),
-        ("D=1, ES=1", cfg(tail, [0] * 1)),
-        ("D=2, ES=1", cfg(tail, [0] * 2)),
-        ("D=3, ES=1", cfg(tail, [0] * 3)),
-        ("D=4, ES=1", cfg(tail, [0] * 4)),
-        ("D=5, ES=1", cfg(tail, [0] * 5)),
-        ("D=6, ES=1", cfg(tail, [0] * 6)),
-        ("D=7, ES=1", cfg(tail, [0] * 7)),
-        ("D=8, ES=1", cfg(tail, [0] * 8)),
-        ("D=9, ES=1", cfg(tail, [0] * 9)),
-        ("D=10, ES=1", cfg(tail, [0] * 10)),
-        ("D=11, ES=1", cfg(tail, [0] * 11)),
-        ("D=12, ES=1", cfg(tail, [0] * 12)),
-        ("D=18, ES=1", cfg(tail, [0] * 18)),
-        ("D=24, ES=1", cfg(tail, [0] * 24)),
-        ("D=32, ES=1", cfg(tail, [0] * 32)),
-        ("D=48, ES=1", cfg(tail, [0] * 48)),
-        ("D=64, ES=1", cfg(tail, [0] * 64)),
-        ("D=96, ES=1", cfg(tail, [0] * 96)),
-        ("D=128, ES=1", cfg(tail, [0] * 128)),
-        ("D=256, ES=1", cfg(tail, [0] * 256)),
-        ("D=512, ES=1", cfg(tail, [0] * 512)),
-        ("D=1024, ES=1", cfg(tail, [0] * 1024)),
-        ("D=10000, ES=1", cfg(tail, [0] * 10000)),
-        ("-----------------", None),
-        ("D=1, ES=9/1", cfg(tail, [0] * 1, euler_step=9 / 1)),
-        ("D=2, ES=9/2", cfg(tail, [0] * 2, euler_step=9 / 2)),
-        ("D=3, ES=9/3", cfg(tail, [0] * 3, euler_step=9 / 3)),
-        ("D=4, ES=9/4", cfg(tail, [0] * 4, euler_step=9 / 4)),
-        ("D=5, ES=9/5", cfg(tail, [0] * 5, euler_step=9 / 5)),
-        ("D=6, ES=9/6", cfg(tail, [0] * 6, euler_step=9 / 6)),
-        ("D=7, ES=9/7", cfg(tail, [0] * 7, euler_step=9 / 7)),
-        ("D=8, ES=9/8", cfg(tail, [0] * 8, euler_step=9 / 8)),
-        ("D=9, ES=9/9", cfg(tail, [0] * 9, euler_step=9 / 9)),
-        ("D=10, ES=9/10", cfg(tail, [0] * 10, euler_step=9 / 10)),
-        ("D=11, ES=9/11", cfg(tail, [0] * 11, euler_step=9 / 11)),
-        ("D=12, ES=9/12", cfg(tail, [0] * 12, euler_step=9 / 12)),
-        ("D=18, ES=9/18", cfg(tail, [0] * 18, euler_step=9 / 18)),
-        ("D=24, ES=9/24", cfg(tail, [0] * 24, euler_step=9 / 24)),
-        ("D=32, ES=9/32", cfg(tail, [0] * 32, euler_step=9 / 32)),
-        ("D=48, ES=9/48", cfg(tail, [0] * 48, euler_step=9 / 48)),
-        ("D=64, ES=9/64", cfg(tail, [0] * 64, euler_step=9 / 64)),
-        ("D=96, ES=9/96", cfg(tail, [0] * 96, euler_step=9 / 96)),
-        ("D=128, ES=9/128", cfg(tail, [0] * 128, euler_step=9 / 128)),
-        ("D=256, ES=9/256", cfg(tail, [0] * 256, euler_step=9 / 256)),
-        ("D=512, ES=9/512", cfg(tail, [0] * 512, euler_step=9 / 512)),
-        ("D=1024, ES=9/1024", cfg(tail, [0] * 1024, euler_step=9 / 1024)),
-        ("D=10000, ES=9/10000", cfg(tail, [0] * 10000, euler_step=9 / 10000)),
-        ("-----------------", None),
-        ("D=1, ES=9/1 RK2", cfg(tail, [0] * 1, euler_step=9 / 1, method="RK2")),
-        ("D=2, ES=9/2 RK2", cfg(tail, [0] * 2, euler_step=9 / 2, method="RK2")),
-        ("D=3, ES=9/3 RK2", cfg(tail, [0] * 3, euler_step=9 / 3, method="RK2")),
-        ("D=4, ES=9/4 RK2", cfg(tail, [0] * 4, euler_step=9 / 4, method="RK2")),
-        ("D=5, ES=9/5 RK2", cfg(tail, [0] * 5, euler_step=9 / 5, method="RK2")),
-        ("D=6, ES=9/6 RK2", cfg(tail, [0] * 6, euler_step=9 / 6, method="RK2")),
-        ("D=7, ES=9/7 RK2", cfg(tail, [0] * 7, euler_step=9 / 7, method="RK2")),
-        ("D=8, ES=9/8 RK2", cfg(tail, [0] * 8, euler_step=9 / 8, method="RK2")),
-        ("D=9, ES=9/9 RK2", cfg(tail, [0] * 9, euler_step=9 / 9, method="RK2")),
-        ("D=10, ES=9/10 RK2", cfg(tail, [0] * 10, euler_step=9 / 10, method="RK2")),
-        ("D=11, ES=9/11 RK2", cfg(tail, [0] * 11, euler_step=9 / 11, method="RK2")),
-        ("D=12, ES=9/12 RK2", cfg(tail, [0] * 12, euler_step=9 / 12, method="RK2")),
-        ("D=18, ES=9/18 RK2", cfg(tail, [0] * 18, euler_step=9 / 18, method="RK2")),
-        ("D=24, ES=9/24 RK2", cfg(tail, [0] * 24, euler_step=9 / 24, method="RK2")),
-        ("D=32, ES=9/32 RK2", cfg(tail, [0] * 32, euler_step=9 / 32, method="RK2")),
-        ("D=48, ES=9/48 RK2", cfg(tail, [0] * 48, euler_step=9 / 48, method="RK2")),
-        ("D=64, ES=9/64 RK2", cfg(tail, [0] * 64, euler_step=9 / 64, method="RK2")),
-        ("D=96, ES=9/96 RK2", cfg(tail, [0] * 96, euler_step=9 / 96, method="RK2")),
-        ("D=128, ES=9/128 RK2", cfg(tail, [0] * 128, euler_step=9 / 128, method="RK2")),
-        ("D=256, ES=9/256 RK2", cfg(tail, [0] * 256, euler_step=9 / 256, method="RK2")),
-        ("D=512, ES=9/512 RK2", cfg(tail, [0] * 512, euler_step=9 / 512, method="RK2")),
-        ("D=1024, ES=9/1024 RK2", cfg(tail, [0] * 1024, euler_step=9 / 1024, method="RK2")),
-        ("-----------------", None),
-        ("D=1, ES=9/1 RK4", cfg(tail, [0] * 1, euler_step=9 / 1, method="RK4")),
-        ("D=2, ES=9/2 RK4", cfg(tail, [0] * 2, euler_step=9 / 2, method="RK4")),
-        ("D=3, ES=9/3 RK4", cfg(tail, [0] * 3, euler_step=9 / 3, method="RK4")),
-        ("D=4, ES=9/4 RK4", cfg(tail, [0] * 4, euler_step=9 / 4, method="RK4")),
-        ("D=5, ES=9/5 RK4", cfg(tail, [0] * 5, euler_step=9 / 5, method="RK4")),
-        ("D=6, ES=9/6 RK4", cfg(tail, [0] * 6, euler_step=9 / 6, method="RK4")),
-        ("D=7, ES=9/7 RK4", cfg(tail, [0] * 7, euler_step=9 / 7, method="RK4")),
-        ("D=8, ES=9/8 RK4", cfg(tail, [0] * 8, euler_step=9 / 8, method="RK4")),
-        ("D=9, ES=9/9 RK4", cfg(tail, [0] * 9, euler_step=9 / 9, method="RK4")),
-        ("D=10, ES=9/10 RK4", cfg(tail, [0] * 10, euler_step=9 / 10, method="RK4")),
-        ("D=11, ES=9/11 RK4", cfg(tail, [0] * 11, euler_step=9 / 11, method="RK4")),
-        ("D=12, ES=9/12 RK4", cfg(tail, [0] * 12, euler_step=9 / 12, method="RK4")),
-        ("D=18, ES=9/18 RK4", cfg(tail, [0] * 18, euler_step=9 / 18, method="RK4")),
-        ("D=24, ES=9/24 RK4", cfg(tail, [0] * 24, euler_step=9 / 24, method="RK4")),
-        ("D=32, ES=9/32 RK4", cfg(tail, [0] * 32, euler_step=9 / 32, method="RK4")),
-        ("D=48, ES=9/48 RK4", cfg(tail, [0] * 48, euler_step=9 / 48, method="RK4")),
-        ("D=64, ES=9/64 RK4", cfg(tail, [0] * 64, euler_step=9 / 64, method="RK4")),
-        ("D=96, ES=9/96 RK4", cfg(tail, [0] * 96, euler_step=9 / 96, method="RK4")),
-        ("D=128, ES=9/128 RK4", cfg(tail, [0] * 128, euler_step=9 / 128, method="RK4")),
-        ("D=256, ES=9/256 RK4", cfg(tail, [0] * 256, euler_step=9 / 256, method="RK4")),
-        ("D=512, ES=9/512 RK4", cfg(tail, [0] * 512, euler_step=9 / 512, method="RK4")),
-        ("D=1024, ES=9/1024 RK4", cfg(tail, [0] * 1024, euler_step=9 / 1024, method="RK4")),
-        ("-----------------", None),
-        ("D=9, ES=0.01", cfg(tail, list(range(n_blocks)), euler_step=0.01)),
-        ("D=9, ES=0.125", cfg(tail, list(range(n_blocks)), euler_step=0.125)),
-        ("D=9, ES=0.25", cfg(tail, list(range(n_blocks)), euler_step=0.25)),
-        ("D=9, ES=0.5", cfg(tail, list(range(n_blocks)), euler_step=0.5)),
-        ("D=9, ES=2.0", cfg(tail, list(range(n_blocks)), euler_step=2.0)),
-        ("D=9, ES=4.0", cfg(tail, list(range(n_blocks)), euler_step=4.0)),
-        ("D=9, ES=8.0", cfg(tail, list(range(n_blocks)), euler_step=8.0)),
-        ("D=9, ES=16.0", cfg(tail, list(range(n_blocks)), euler_step=16.0)),
-        ("-----------------", None),
-        ("D=45, ES=9/2.5", cfg(tail, list(range(n_blocks)), euler_step=9 / 2.5)),
-        ("D=45, ES=9/5", cfg(tail, list(range(n_blocks)), euler_step=9 / 5)),
-        ("D=45, ES=9/11", cfg(tail, list(range(n_blocks)), euler_step=9 / 11)),
-        ("D=45, ES=9/22.5", cfg(tail, list(range(n_blocks)), euler_step=9 / 22.5)),
-        ("D=45, ES=9/45", cfg(tail, list(range(n_blocks)), euler_step=9 / 45)),
-        ("D=45, ES=9/90", cfg(tail, list(range(n_blocks)), euler_step=9 / 90)),
-        ("D=45, ES=9/180", cfg(tail, list(range(n_blocks)), euler_step=9 / 180)),
-        ("D=45, ES=9/360", cfg(tail, list(range(n_blocks)), euler_step=9 / 360)),
-        ("D=45, ES=9/720", cfg(tail, list(range(n_blocks)), euler_step=9 / 720)),
-    ]
+def migrate_legacy_names(csv_path: Path) -> None:
+    """Rename rows of an older results.csv to ``config_name`` and add the ``T`` column.
+
+    Legacy sweeps used free-form labels (e.g. "D=45, ES=9/11" was really D=9). Names are
+    rebuilt from each row's stored configuration; duplicate configs keep the first row.
+    The original file is kept as ``results_legacy_labels.csv``.
+    """
+    if not csv_path.is_file():
+        return
+    df = pd.read_csv(csv_path)
+    if df.empty or "configuration" not in df.columns:
+        return
+    cfgs = df["configuration"].map(json.loads)
+    depth = cfgs.map(lambda c: shared_block_count(c["block_indices"]))
+    es = cfgs.map(lambda c: float(c.get("euler_step", 1.0)))
+    method = cfgs.map(lambda c: (c.get("method") or "RK1").upper())
+    names = [config_name(d, e, m) for d, e, m in zip(depth, es, method)]
+    if "T" in df.columns and list(df["name"]) == names:
+        return
+    backup = csv_path.with_name("results_legacy_labels.csv")
+    if not backup.exists():
+        df.to_csv(backup, index=False)
+    df["name"] = names
+    df["depth"] = depth
+    df["euler_step"] = es
+    df["method"] = method
+    df["T"] = depth * es
+    before = len(df)
+    df = df.drop_duplicates("name", keep="first")
+    df[RESULT_COLUMNS].to_csv(csv_path, index=False)
+    print(f"Migrated {csv_path.name}: {before} rows -> {len(df)} canonical (backup {backup.name})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,6 +182,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=9,
         help="Stage-3 block count for --list-only",
+    )
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--num-workers", type=int, default=None, help="Default: min(NUM_WORKERS, CPUs)")
+    parser.add_argument(
+        "--only-section",
+        choices=["A", "B", "C", "D"],
+        nargs="+",
+        default=None,
+        help="Run only these grid sections (see build_configurations)",
     )
     return parser.parse_args()
 
@@ -346,10 +298,12 @@ class AblationRunner:
             f"top1={top1acc:.4f}  loss={loss_mean:.4f}  n={int(total_samples)}"
         )
 
+        depth = shared_block_count(block_indices)
         return {
             "configuration": configuration,
-            "depth": len([i for i in block_indices if i < self.n_blocks]),
+            "depth": depth,
             "euler_step": euler_step,
+            "T": depth * euler_step,
             "method": method,
             "top1acc": top1acc,
             "loss": loss_mean,
@@ -363,6 +317,7 @@ RESULT_COLUMNS = [
     "name",
     "depth",
     "euler_step",
+    "T",
     "method",
     "top1acc",
     "loss",
@@ -378,6 +333,7 @@ def row_to_record(name: str, row: dict) -> dict:
         "name": name,
         "depth": row["depth"],
         "euler_step": row["euler_step"],
+        "T": row["T"],
         "method": row.get("method") or "RK1",
         "top1acc": row["top1acc"],
         "loss": row["loss"],
@@ -404,27 +360,43 @@ def append_result(csv_path: Path, record: dict) -> None:
     )
 
 
+def filter_sections(
+    configurations: list[tuple[str, CustomForwardConfig | None]], sections: list[str] | None
+) -> list[tuple[str, CustomForwardConfig | None]]:
+    """Keep only rows under the ``--- X. ... ---`` headers whose letter is in ``sections``."""
+    if not sections:
+        return configurations
+    out, current = [], None
+    for name, configuration in configurations:
+        if configuration is None:
+            current = name.strip("- ").split(".", 1)[0]
+        if current in sections:
+            out.append((name, configuration))
+    return out
+
+
 def main() -> None:
     load_dotenv()
     args = parse_args()
     output_dir = OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "results.csv"
+    migrate_legacy_names(csv_path)
+    completed = load_completed_names(csv_path) if RESUME else set()
 
     if args.list_only:
         n_blocks = args.n_blocks
         tail = [n_blocks, n_blocks + 1]
-        configurations = build_configurations(n_blocks, tail)
+        configurations = filter_sections(build_configurations(n_blocks, tail), args.only_section)
+        todo = 0
         for name, configuration in configurations:
             if configuration is None:
                 print(name)
                 continue
-            method = configuration.get("method") or "RK1"
-            depth = len([i for i in configuration["block_indices"] if i < n_blocks])
-            print(
-                f"{name:22s}  depth={depth:2d}  h={configuration.get('euler_step', 1.0)}  "
-                f"m={method}  blocks={shared_block_count(configuration['block_indices'])}"
-            )
+            done = name in completed
+            todo += not done
+            print(f"  {'done' if done else 'TODO'}  {name}")
+        print(f"{todo} configurations to run")
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -432,8 +404,9 @@ def main() -> None:
     print(f"experiment={EXPERIMENT_NAME}")
     print(f"output_dir={output_dir.resolve()}")
     print(f"checkpoint={CHECKPOINT.resolve()}")
-    print(f"batch_size={BATCH_SIZE}")
-    print(f"num_workers={NUM_WORKERS}")
+    num_workers = args.num_workers if args.num_workers is not None else min(NUM_WORKERS, available_cpus())
+    print(f"batch_size={args.batch_size}")
+    print(f"num_workers={num_workers}")
     print(f"max_batches={MAX_BATCHES}")
     print(f"amp={AMP}")
     print(f"resume={RESUME}")
@@ -452,20 +425,19 @@ def main() -> None:
     tail = [n_blocks, n_blocks + 1]
     print(f"stage3_length={n_blocks}, tail indices={tail}")
 
-    configurations = build_configurations(n_blocks, tail)
+    configurations = filter_sections(build_configurations(n_blocks, tail), args.only_section)
 
-    completed = load_completed_names(csv_path) if RESUME else set()
     if completed:
         print(f"Resuming: {len(completed)} configurations already in {csv_path}")
 
     runner = AblationRunner(
         model,
         device=device,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         max_batches=MAX_BATCHES,
         amp=AMP,
         n_blocks=n_blocks,
-        num_workers=NUM_WORKERS,
+        num_workers=num_workers,
     )
 
     for name, configuration in configurations:

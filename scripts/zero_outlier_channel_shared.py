@@ -48,8 +48,10 @@ from models.backbones.delta_convnext import CustomForwardConfig, DeltaConvNext
 from scripts.feature_map_explorer import (
     SHARED_CHECKPOINT,
     load_shared_convnext,
+    most_active_channels,
     save_metric_plots,
     save_tables_and_config,
+    save_visuals,
     shared_r1_groups,
     trajectory_stats,
 )
@@ -180,7 +182,14 @@ def run_feature_maps(
     tag: str,
     image_index: int,
     out_dir: Path,
+    with_videos: bool = False,
+    video_extra_channels: list[int] | None = None,
 ) -> dict:
+    """Metrics for one zeroing config; with ``with_videos`` also videos + static scatters.
+
+    Per-channel videos use the explorer's top-``N_AUTO_CHANNELS`` most active channels
+    of ``mean_h`` plus ``video_extra_channels`` (the outlier, so runs are comparable).
+    """
     import scripts.feature_map_explorer as fme
 
     fme.FORCE_RECOMPUTE = True
@@ -215,6 +224,7 @@ def run_feature_maps(
         dataset=dataset,
         block_schedule=[0] * D,
         zero_channels_after_step=channels,
+        metric_ignore_channels=channels,
         r1_groups=shared_r1_groups(D, euler_step, N_BLOCKS),
         r1_blocks=[model.deltifiedStage3[0]] * N_BLOCKS,
     )
@@ -240,7 +250,11 @@ def run_feature_maps(
     res["weight_interpolation"] = "plain"
     res["overlay_label"] = f"R{R}"
     res["ignored_channels"] = list(channels)
-    res["resolved_channels"] = list(channels)
+    video_channels = [int(c) for c in (video_extra_channels or [])]
+    video_channels += [
+        c for c in most_active_channels(res["mean_h"], fme.N_AUTO_CHANNELS) if c not in video_channels
+    ]
+    res["resolved_channels"] = video_channels
 
     mean_x = res["mean_x"]
     for ch in channels[:5]:
@@ -250,6 +264,9 @@ def run_feature_maps(
     save_tables_and_config(res, class_names, run_dir)
     save_metric_plots(res, run_dir)
     print(f"  metrics → {run_dir / 'metrics' / 'metrics.png'}")
+    if with_videos:
+        print(f"  videos channels={video_channels}")
+        save_visuals(res, video_channels, run_dir)
     return {
         "name": name,
         "tag": tag,
@@ -258,9 +275,10 @@ def run_feature_maps(
         "euler_step": euler_step,
         "channels": channels,
         "run_dir": str(run_dir),
-        "rectitude_mean": float(res.get("rectitude_mean", float("nan"))),
-        "L_mean": float(res.get("L_mean", float("nan"))),
-        "N_mean": float(res.get("N_mean", float("nan"))),
+        **{
+            f"{col}_mean": (res["scalar_summary"].get(col) or {}).get("mean")
+            for col in ("R", "L", "N")
+        },
         "metrics_png": str(run_dir / "metrics" / "metrics.png"),
     }
 
@@ -487,6 +505,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also save metrics plots when zeroing each random channel (default: off).",
     )
+    p.add_argument(
+        "--with-videos",
+        action="store_true",
+        help="Also write feature-map videos / grids / static scatters for every metrics run.",
+    )
     p.add_argument("--R", nargs="+", type=int, default=[1, 10], choices=sorted(R_SCHEDULE))
     p.add_argument("--n-random", type=int, default=N_RANDOM_CHANNELS)
     p.add_argument("--seed", type=int, default=RANDOM_SEED)
@@ -586,6 +609,8 @@ def main() -> None:
                     tag="baseline",
                     image_index=image_index,
                     out_dir=out_root / "featureMaps",
+                    with_videos=args.with_videos,
+                    video_extra_channels=[outlier],
                 )
             )
         if not args.skip_val:
@@ -612,6 +637,8 @@ def main() -> None:
                     tag="outlier",
                     image_index=image_index,
                     out_dir=out_root / "featureMaps",
+                    with_videos=args.with_videos,
+                    video_extra_channels=[outlier],
                 )
             )
         if not args.skip_val:
@@ -639,6 +666,8 @@ def main() -> None:
                         tag="random1",
                         image_index=image_index,
                         out_dir=out_root / "featureMaps",
+                        with_videos=args.with_videos,
+                        video_extra_channels=[outlier],
                     )
                 )
             if not args.skip_val:
@@ -666,6 +695,12 @@ def main() -> None:
     for row in val_rows:
         val_rows_json.append({**row, "zero_channels": row["zero_channels"]})
 
+    summary_path = out_root / "summary.json"
+    if not val_rows and summary_path.is_file():
+        # --skip-val: keep the validation results of the previous run.
+        previous = json.loads(summary_path.read_text())
+        val_rows_json = previous.get("val", [])
+        hist_paths = previous.get("histograms", [])
     summary = {
         "detected": detect,
         "random_channels": random_channels,

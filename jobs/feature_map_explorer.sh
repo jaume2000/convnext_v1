@@ -31,6 +31,11 @@
 #   TRAIN_ARGS='--metrics-only --force'  # always re-integrate, metrics only
 #   TRAIN_ARGS='--keep-frames'
 #   FEATURE_MAP_ROOT=/custom/path
+#
+# N=500 statistics suite (metrics only), one job per section; --skip-existing resumes:
+#   source .env && TRAIN_ARGS='--suite n500 --section A --skip-existing' \
+#     sbatch --account="$SLURM_ACCOUNT" --time=02:00:00 --mem=100G jobs/feature_map_explorer.sh
+#   (B: --time=16:00:00, C: --time=08:00:00)
 
 set -euo pipefail
 

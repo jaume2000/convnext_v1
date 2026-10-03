@@ -32,12 +32,15 @@ else
   PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# A RETAKE passed on the command line must win over the RETAKE=0 kept in .env.
+RETAKE_CLI="${RETAKE:-}"
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "${PROJECT_ROOT}/.env"
   set +a
 fi
+export RETAKE="${RETAKE_CLI:-${RETAKE:-0}}"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ -z "${SLURM_ACCOUNT:-}" ]]; then
@@ -92,10 +95,9 @@ if [[ ! -d "${HF_DATASETS_CACHE}/${DATASET_DIR}" ]]; then
   exit 1
 fi
 
-# From .env (or override): EXPERIMENT_NAME=shared_convnextv1_D27_imagenet
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-shared_convnextv1_D27_imagenet}"
+# Not EXPERIMENT_NAME: .env points it at the D9 shared run, which this job must not touch.
+EXPERIMENT_NAME="${D27_EXPERIMENT_NAME:-shared_convnextv1_D27_imagenet}"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
-RETAKE="${RETAKE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 if [[ "${RETAKE}" == "1" ]]; then

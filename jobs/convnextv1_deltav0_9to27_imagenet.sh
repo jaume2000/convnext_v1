@@ -31,12 +31,15 @@ else
   PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# A RETAKE passed on the command line must win over the RETAKE=0 kept in .env.
+RETAKE_CLI="${RETAKE:-}"
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "${PROJECT_ROOT}/.env"
   set +a
 fi
+export RETAKE="${RETAKE_CLI:-${RETAKE:-0}}"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ -z "${SLURM_ACCOUNT:-}" ]]; then
@@ -97,7 +100,6 @@ fi
 EXPERIMENT_NAME="convnextv1_deltav0_9to27_imagenet"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-RETAKE="${RETAKE:-0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 
 # Both checks run before the ~150G of staging below, so a missing file costs seconds
