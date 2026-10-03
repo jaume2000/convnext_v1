@@ -31,7 +31,10 @@ STAGE3_LENGTH = 27  # one shared block looped 27 times (vs 9 in the D9 shared ba
 USE_DDP = True
 EPOCHS = 300
 WARMUP_EPOCHS = 10
-BATCH_SIZE = 256
+# Global batch the 4-GPU segments ran with. Fewer GPUs make it up with gradient
+# accumulation, so LR and the per-step schedule match on resume.
+GLOBAL_BATCH_SIZE = 1024
+BATCH_SIZE = 256  # per GPU and micro-batch
 # ConvNeXt uses 4e-3 at batch 4096; linear scaling gives the equivalent for our batch.
 LR = 1e-3
 MIN_LR = 1e-7
@@ -63,6 +66,9 @@ def setup_ddp():
 
 local_rank, rank, world_size = setup_ddp() if USE_DDP else (0, 0, 1)
 use_ddp = USE_DDP and world_size > 1 and torch.cuda.is_available()
+if GLOBAL_BATCH_SIZE % (BATCH_SIZE * world_size):
+    raise ValueError(f"GLOBAL_BATCH_SIZE={GLOBAL_BATCH_SIZE} not divisible by {BATCH_SIZE} x {world_size} ranks")
+GRAD_ACCUM_STEPS = GLOBAL_BATCH_SIZE // (BATCH_SIZE * world_size)
 
 if torch.cuda.is_available():
     device = torch.device(f"cuda:{local_rank}")
@@ -80,7 +86,7 @@ if rank == 0 and not USE_DELTAS:
 if use_ddp:
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     if rank == 0:
-        print(f"DDP on {world_size} GPUs (local_rank={local_rank})")
+        print(f"DDP on {world_size} GPUs (local_rank={local_rank}), grad accumulation x{GRAD_ACCUM_STEPS}")
 elif device.type == "cuda":
     print("Using single GPU: cuda:0")
 else:
@@ -126,7 +132,7 @@ if rank == 0:
         msg += f", none on {sum(p.numel() for g in no_wd for p in g['params'])} (norms, biases, layer scale)"
     print(msg)
 optimizer = AdamW(param_groups, lr=LR, betas=(0.9, 0.999))
-steps_per_epoch = len(train_loader)
+steps_per_epoch = len(train_loader) // GRAD_ACCUM_STEPS
 scheduler = CosineWithWarmup(
     optimizer,
     warmup_steps=WARMUP_EPOCHS * steps_per_epoch,
@@ -161,6 +167,7 @@ trainer = Trainer(
     num_classes=1000,
     amp=False,
     gradient_clipping=None,
+    grad_accum_steps=GRAD_ACCUM_STEPS,
     retake=RETAKE,
 )
 trainer.fit(EPOCHS, train_history_metrics, val_history_metrics)

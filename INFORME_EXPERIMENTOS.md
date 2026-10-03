@@ -1,6 +1,6 @@
 # Informe de experimentos — ¿Son las redes residuales discretizaciones de una ODE?
 
-Fecha: 3 oct 2026. Fuentes: CSVs en `outputs/` (interpolación, ablation shared, historiales de entrenamiento, `featureMaps*`, `zero_outlier_channel_shared`).
+Fecha: 3 oct 2026. Fuentes: CSVs en `outputs/` (interpolación, ablation shared, historiales de entrenamiento, `featureMaps*` (incluida la suite N500), `zero_outlier_channel_shared`, `ignored_channel_histogram`).
 
 ---
 
@@ -16,6 +16,7 @@ Fecha: 3 oct 2026. Fuentes: CSVs en `outputs/` (interpolación, ablation shared,
 | 6 | ¿Qué hace ese canal? | **No retroalimenta la dinámica del resto de canales** (borrarlo en la ODE ≡ ignorarlo al medir, <0.5% diferencia), pero su borrado cuesta **−12.5 pts** (80.34→67.81). Su efecto es *downstream* (stage 4 / normalización). La hipótesis "cronómetro interno" queda descartada dentro del stage 3; "cronómetro/escala leída por el stage 4" sigue abierta. |
 | 7 | Euler vs RK2 vs RK4 | Las redes están **afinadas a Euler ES=1**: RK2/RK4 en el paso de entrenamiento pierden 0.15–2.5 pts y dan directamente el límite ODE. Con pasos grandes (D pequeño, T fijo) RK4 ≫ Euler. |
 | 8 | ¿Interpolación bilinear de pesos? | **No funciona en ningún modelo** (−7 a −24 pts a R=128). Solo la interpolación "plana" (constante a trozos) preserva la accuracy. |
+| 9 | ¿Son robustas las métricas de dinámica (n=500 imágenes)? | **Sí.** La imagen única de §4/§6 era representativa (todo a <1.5σ) y la variabilidad entre imágenes es pequeña (σ(R) ≤ 0.025): la geometría es de la red, no de la imagen. Sin el canal masivo: Swin 0.81 > shared 0.78 > ConvNeXt 0.50 > dp0 0.44 > ResNet-50 0.40 > ResNet-101 0.17. Sin droppath los bloques **no se contraen** (a_t > 0, ‖h‖/‖x‖ crece). |
 
 ---
 
@@ -269,7 +270,7 @@ Hipótesis:
 - **❓ Cronómetro / escala leída *downstream***: el stage 4 (o el LayerNorm del downsampling) podría usar ‖x₂₃₆‖ como codificación de t o como escala global. Al dominar el 98% de la energía, fija la varianza del LayerNorm de canal en el downsampling; si se quita, la escala del resto cambia ~7× (3301/481) ⇒ shift de distribución en el stage 4. Es el mecanismo típico de las *massive activations* (actúan como bias/escala casi constante, cf. Sun et al. 2024).
 - **❓ Bias constante vs información**: no sabemos aún si el valor del canal depende de la imagen (información) o es casi constante (bias).
 
-Tests que discriminan (no ejecutados, ver §10):
+Tests que discriminan (no ejecutados, ver §11):
 - Sustituir el canal por su **media sobre el dataset** (constante) en lugar de 0 → si se recupera la accuracy, es un bias/escala, no información.
 - Sustituirlo por su valor a **otro t** (p. ej. t=4.5 o t=18) dejando el resto intacto → si la accuracy cae como en el sweep de T, es un reloj leído downstream.
 - **Zero solo a la salida** del stage 3 (no en cada paso): dado el hecho 1, debería dar la misma loss que el zeroing completo; confirma que todo el efecto es downstream.
@@ -326,21 +327,107 @@ RK2/RK4 con bilinear dan lo mismo o peor (convergen al mismo límite bajo).
 
 ---
 
-## 10. ¿Qué falta? Tests pendientes
+## 10. Experimento 9 — Estadística con 500 imágenes (suite N500)
 
-### 10.1 Ya identificados por ti
+`feature_map_explorer.py --suite n500`: **una imagen de cada una de 500 clases aleatorias** (seed 0; las mismas 500 imágenes en todos los runs), solo métricas. 26 runs: secciones A (horizonte de entrenamiento: shared D9 ES1, interpolados R1 ES1), B (Euler fino: shared D100 ES0.09, interpolados R100 ES0.01) y C (shared D100 RK4, ConvNeXt / ConvNeXt dp0 bilinear R100). Los `_ignore1` solo existen para los modelos con canal masivo (ConvNeXt ×3, Swin); en ResNet no hay canal que quitar.
+
+Los valores son **media ± desviación típica entre imágenes**. El IC 95% de la media es ≈ ±0.09·σ (n=500), así que todas las diferencias de la tabla mayores que ~0.1·σ son significativas. κ, ω, a_n/‖a‖ y a_t/‖a‖ son medias sobre los pares **intra-bloque**; ω_inter es la media en los cambios de bloque. Para los runs R1 / D9 (un paso por bloque) solo se dan los escalares.
+
+### 10.1 ¿Era representativa la imagen única (snow leopard)?
+
+**Sí.** Comparando con §4.1 y §6.2 (n=1, corregidos):
+
+| Run | R (n=1) | R (N500) | PR_depth (n=1 → N500) | PR_spatial (n=1 → N500) |
+|---|---|---|---|---|
+| shared D100 ES0.09 | 0.976 | 0.970 ± 0.008 | 1.07 → 1.09 | 1.03 → 1.03 |
+| shared D100 −ch236 | 0.795 | 0.776 ± 0.020 | 1.80 → 1.94 | **3.80 → 6.24 ± 1.68** |
+| ConvNeXt R100 | 0.941 | 0.938 ± 0.010 | 1.17 → 1.19 | 1.14 → 1.13 |
+| ConvNeXt R100 −ch195 | 0.495 | 0.502 ± 0.011 | 3.66 → 3.46 | 28.4 → 32.0 ± 6.7 |
+| Swin R100 | 0.823 | 0.825 ± 0.014 | 1.17 → 1.17 | 6.81 → 6.15 ± 2.73 |
+| Swin R100 −ch322 | 0.806 | 0.812 ± 0.016 | 1.19 → 1.17 | 7.86 → 7.31 ± 3.56 |
+| ResNet-50 R100 | 0.389 | 0.396 ± 0.012 | 5.12 → 4.94 | 6.40 → 5.84 |
+| ResNet-101 R100 | 0.162 | 0.169 ± 0.005 | 20.09 → 19.66 | 13.30 → 12.10 |
+
+- Todas las métricas de n=1 caen a **menos de ~1.5σ** de la media de 500 imágenes; κ, ω, a_n/‖a‖, cos(x₀,x_T) y cos(h₀,h_T) también coinciden (p. ej. ConvNeXt −ch195: κ 0.020 → 0.021, ω 0.63 → 0.61, a_n/‖a‖ 0.96 → 0.97, cos(x₀,x_T) 0.20 → 0.21).
+- La **variabilidad entre imágenes es pequeña**: σ(R) ≈ 0.005–0.025, σ(PR_depth)/media ≈ 2–10%. La geometría de la trayectoria es una propiedad **de la red**, no de la imagen. La única métrica muy variable es **PR_spatial** (CV 20–45%).
+- Única corrección relevante: en el **shared sin el canal**, la snow leopard subestimaba la dimensionalidad espacial (3.8 vs 6.2 ± 1.7). Las conclusiones de §6.2 no cambian.
+- El canal masivo es **el mismo en todas las imágenes** (`ignored_channel_histogram/summary_n200.json`, 200 imágenes): ch236 en el shared, ch195 en ConvNeXt y ch225 en ConvNeXt dp0 son el top-1 en 200/200, con 97–99% de la energía (mediana) y 18–54× el segundo canal. En Swin, ch322 es top-1 en 200/200 pero solo con un ~15%. En ResNet-50/101 el top-1 cambia entre imágenes (15 y 55 canales distintos) y pesa ~1%: no hay massive activation.
+
+### 10.2 Dinámica con todos los canales (N500)
+
+| Run | R | PR_depth | PR_spatial | κ intra | ω intra | ω inter | a_n/‖a‖ | a_t/‖a‖ | cos(x₀,x_T) | cos(h₀,h_T) | ‖h‖/‖x‖ t=0 → T |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| shared D9 ES1 | 0.963 | 1.12 | 1.03 | — | — | — | — | — | 0.67 | 0.62 | 1.60 → 0.04 |
+| shared D100 ES0.09 | 0.970 | 1.09 | 1.03 | 0.0005 | 0.15 | — | 0.58 | −0.07 | 0.67 | 0.73 | 1.60 → 0.05 |
+| shared D100 RK4 | 0.971 | 1.09 | 1.03 | 0.0005 | 0.15 | — | 0.58 | −0.07 | 0.67 | 0.74 | 1.60 → 0.05 |
+| ConvNeXt R1 | 0.939 | 1.18 | 1.16 | — | — | — | — | — | 0.47 | 0.17 | 0.38 → 0.18 |
+| ConvNeXt R100 | 0.938 | 1.19 | 1.13 | 0.0098 | 0.34 | 65 | 0.87 | −0.38 | 0.48 | 0.17 | 0.38 → 0.23 |
+| ConvNeXt dp0 R1 | 0.941 | 1.03 | 5.92 | — | — | — | — | — | 0.34 | 0.27 | 0.39 → 0.58 |
+| ConvNeXt dp0 R100 | 0.934 | 1.04 | 8.76 | 0.0200 | 0.56 | 103 | 0.96 | **+0.04** | 0.33 | 0.27 | 0.39 → **0.65** |
+| Swin R1 | 0.800 | 1.21 | 6.18 | — | — | — | — | — | 0.09 | 0.04 | 0.72 → 0.59 |
+| Swin R100 | 0.825 | 1.17 | 6.15 | 0.0042 | 0.50 | 104 | 0.89 | −0.39 | 0.09 | 0.04 | 0.72 → 0.60 |
+| ResNet-50 R1 | 0.371 | 4.70 | 6.78 | — | — | — | — | — | 0.52 | −0.07 | 0.55 → 0.39 |
+| ResNet-50 R100 | 0.396 | 4.94 | 5.84 | 0.0024 | 0.63 | 164 | 0.90 | −0.41 | 0.60 | −0.08 | 0.55 → 0.41 |
+| ResNet-101 R1 | 0.158 | 19.21 | 16.71 | — | — | — | — | — | 0.45 | −0.02 | 0.41 → 0.22 |
+| ResNet-101 R100 | 0.169 | 19.66 | 12.10 | 0.0022 | 0.54 | 152 | 0.93 | −0.31 | 0.48 | −0.04 | 0.41 → 0.23 |
+
+### 10.3 Dinámica sin el canal masivo (N500, `_ignore1` corregidos)
+
+| Run | R | PR_depth | PR_spatial | κ intra | ω intra | ω inter | a_n/‖a‖ | a_t/‖a‖ | cos(x₀,x_T) | cos(h₀,h_T) | dist. rel. a R1 (t=T) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| shared D9 −ch236 | 0.718 ± 0.021 | 2.47 | 6.45 | — | — | — | — | — | 0.30 | −0.13 | — |
+| shared D100 −ch236 | 0.776 ± 0.020 | 1.94 | 6.24 | 0.0075 | 0.41 | — | 0.95 | −0.06 | 0.31 | −0.06 | 0.19 |
+| shared D100 RK4 −ch236 | 0.779 ± 0.020 | 1.92 | 6.34 | 0.0074 | 0.41 | — | 0.95 | −0.06 | 0.31 | −0.06 | 0.20 |
+| ConvNeXt R1 −ch195 | 0.501 ± 0.011 | 3.39 | 32.2 | — | — | — | — | — | 0.20 | 0.02 | — |
+| ConvNeXt R100 −ch195 | 0.502 ± 0.011 | 3.46 | 32.0 | 0.021 | 0.61 | 140 | 0.97 | −0.21 | 0.21 | 0.02 | 0.36 |
+| ConvNeXt dp0 R1 −ch225 | 0.447 ± 0.012 | 3.02 | 31.9 | — | — | — | — | — | 0.18 | 0.02 | — |
+| ConvNeXt dp0 R100 −ch225 | **0.438 ± 0.012** | 3.20 | 29.5 | **0.028** | **0.84** | **150** | 0.98 | **+0.10** | 0.17 | 0.01 | **0.58** |
+| Swin R1 −ch322 | 0.784 ± 0.022 | 1.23 | 7.56 | — | — | — | — | — | 0.08 | 0.03 | — |
+| Swin R100 −ch322 | 0.812 ± 0.016 | 1.17 | 7.31 | 0.0044 | 0.51 | 108 | 0.89 | −0.39 | 0.08 | 0.03 | 0.33 |
+
+### 10.4 Bilinear (N500)
+
+| Run | R | PR_depth | PR_spatial | κ intra | ω intra | a_t/‖a‖ | dist. rel. a R1 (t=T) |
+|---|---|---|---|---|---|---|---|
+| ConvNeXt plain / bilinear | 0.938 / 0.935 | 1.19 / 1.17 | 1.13 / 2.78 | 0.010 / **0.120** | 0.34 / **2.26** | −0.38 / +0.11 | 0.17 / **0.33** |
+| ConvNeXt −ch195 plain / bilinear | 0.502 / 0.519 | 3.46 / 2.62 | 32.0 / 4.6 | 0.021 / **0.194** | 0.61 / **3.44** | −0.21 / +0.04 | 0.36 / **0.73** |
+| ConvNeXt dp0 plain / bilinear | 0.934 / 0.946 | 1.04 / 1.06 | 8.8 / 1.04 | 0.020 / **0.138** | 0.56 / **2.29** | +0.04 / +0.20 | 0.28 / **0.37** |
+| ConvNeXt dp0 −ch225 plain / bilinear | 0.438 / 0.459 | 3.20 / 2.65 | 29.5 / 1.12* | 0.028 / **0.183** | 0.84 / **3.18** | +0.10 / +0.10 | 0.58 / **0.88** |
+
+\*PR_spatial de dp0 bilinear −ch225 (1.12) es sospechosamente bajo frente al plain (29.5); probablemente otro canal domina el punto medio de la trayectoria en ese run. Revisar antes de interpretarlo.
+
+### 10.5 Análisis
+
+- **Las conclusiones de §4 y §6 se mantienen con 500 imágenes** y con intervalos de confianza estrechos. El orden en rectitud con todos los canales (**shared 0.97 > ConvNeXt 0.94 ≈ dp0 0.93 > Swin 0.83 > ResNet-50 0.40 > ResNet-101 0.17**) es el mismo, y ninguna diferencia entre modelos es comparable a la variabilidad entre imágenes.
+- **Sin el canal masivo el orden cambia**: Swin 0.81 > shared 0.78 > ConvNeXt 0.50 > ConvNeXt dp0 0.44 > ResNet-50 0.40 > ResNet-101 0.17. La ConvNeXt no compartida sin su canal es casi tan tortuosa como ResNet-50 en rectitud, aunque sigue siendo de menor dimensión en profundidad (PR_depth 3.5 vs 4.9) y mucho más dispersa espacialmente (PR_spatial 32 vs 6). **Swin es la red no compartida con la trayectoria genuinamente más recta.**
+- **Refinar el paso no cambia la geometría global**: R1 y R100 dan prácticamente los mismos R, PR y cosenos en todos los modelos (p. ej. ConvNeXt −ch195 0.501 vs 0.502; ResNet-101 0.158 vs 0.169). En el shared, **RK4 D100 ≡ Euler D100** (todas las métricas dentro del IC): D100 ya está en el límite continuo, coherente con la accuracy (§3.2). En cambio, D9 ES1 es algo más curvo y de mayor dimensión que el límite continuo (sin canal: R 0.72 vs 0.78, PR_depth 2.47 vs 1.94). Ese error de discretización es el que la red explota (§2, §8).
+- **ConvNeXt dp0 (nuevo; antes no había métricas `_ignore1` corregidas)**: sin el canal es la ConvNeXt **más curva y rotacional** (κ 0.028 vs 0.021, ω intra 0.84 vs 0.61, ω inter 150 vs 140) y la que **más se aleja de la trayectoria nativa** (dist. rel. 0.58 vs 0.36). Además, es la única red en la que la trayectoria **acelera dentro de cada bloque** (a_t/‖a‖ > 0, también con todos los canales) y ‖h‖/‖x‖ **crece** con la profundidad (0.39 → 0.65–0.78). En el resto, a_t < 0 (frenado intra-bloque) y ‖h‖/‖x‖ decrece. Es decir, sin droppath los bloques **no se contraen**. Encaja con su gap Euler→ODE 3× mayor (§5) y refuerza la hipótesis de que el droppath suaviza el campo.
+- **Shared sin canal**: dinámica rotacional confirmada (a_n/‖a‖ = 0.95; h termina ortogonal, cos(h₀,h_T) = −0.06 ± 0.04) y deriva que se apaga (‖h‖/‖x‖ → 0.10). El campo del shared casi no frena intra-paso (a_t/‖a‖ ≈ −0.06), a diferencia de las interpoladas (−0.2 a −0.4).
+- **Swin**: quitar ch322 apenas cambia nada (R 0.825 → 0.812): su rectitud es real.
+- **ResNet**: la tortuosidad y la alta dimensión (PR_depth ≈ 5 y ≈ 20) son reales y estables entre imágenes. Sin canal masivo, no hace falta `_ignore1`.
+- **Bilinear**: deja intacta la **forma global** (R, PR_depth parecidos al plain) pero multiplica la curvatura local ×6–12 y ω ×4–7, invierte el signo de a_t (acelera en lugar de frenar) y duplica la distancia a la trayectoria nativa. Es decir, introduce un "temblor" de alta frecuencia sobre el mismo camino, compatible con bloques intermedios que no son funcionales (§9).
+
+> Nota: las copias **locales** de los runs `_c289_n1_ignore1` siguen siendo las anteriores al fix (ninguna tiene `metrics_ignore_version` y sus métricas coinciden con las de los runs con todos los canales). Los valores n=1 de §6.2 vienen de los runs corregidos. Para compararlos localmente hay que volver a sincronizarlos o regenerarlos (§11.2).
+
+---
+
+## 11. ¿Qué falta? Tests pendientes
+
+### 11.1 Ya identificados por ti
 - **Shared D27** (33/300 épocas, 70.5% val) y **shared all-stages** (53/300 épocas, 69.95%): terminar el entrenamiento y pasarles la ablation D/ES/RK y las métricas de dinámica.
 - **Todo lo de los deltas** (`convnextv1_deltav0_*`: 80.41 / 80.33 (9→27) / 81.25 (wu10 e50 lr1e-3) / 79.16 (wu5 e100 lr1e-4, 30 ep)).
 
-### 10.2 Re-ejecuciones necesarias por el bug del canal ignorado
+### 11.2 Re-ejecuciones necesarias por el bug del canal ignorado
 Hasta el fix, los `_ignore1` solo enmascaraban `norm_mean_*` / `acc_mean_h`. **Están corregidos solo 3**: shared D100 ES0.09, ConvNeXt R100 ES0.01, Swin R100 ES0.01. Quedan **41 runs desactualizados**, entre ellos:
 - ResNet-50, ResNet-101 y ConvNeXt dp0 **R100 ES0.01** (estaban en tu tanda pero no se regeneraron; probablemente se interrumpió).
 - Todos los `baseline_R1`, `ES0.1`, `ES1`, `bilinear`, `RK4` de todos los modelos, y shared D9 / D100 RK4 / ES0.9 / ES9.
 
 Bastaría con `--force --only <runs _ignore1>` (o `--metrics-only` si no quieres vídeos). Los runs base de ConvNeXt dp0 y los bilinear (29-sep) además no tienen κ ni la descomposición de la aceleración: re-ejecutar con `--metrics-only`.
 
-### 10.3 Experimentos que faltan para cerrar conclusiones
-1. **Estadística**: todas las métricas de dinámica son de **1 imagen**. Repetir con n≥32 imágenes de varias clases antes de dar los números como definitivos.
+Los 11 runs `_ignore1` de la suite N500 ya están corregidos (`metrics_ignore_version: 1`) y cubren los R1 / R100 / bilinear / RK4 principales con 500 imágenes (§10). Los `_c289_n1_ignore1` solo hacen falta si quieres los vídeos de la snow leopard sin canal.
+
+### 11.3 Experimentos que faltan para cerrar conclusiones
+1. ~~**Estadística**: repetir con n≥32 imágenes~~ → **Hecho** (suite N500, §10). Falta extenderla a los `ES0.1`, `ES1` (T×100), shared ES0.9 / ES9 y los controles `rand_*` si se quieren citar con barras de error.
 2. **Papel del canal masivo** (§7.3): reemplazo por media, *time-shift*, zero solo a la salida, varianza entre imágenes, linear probe, análisis del LayerNorm del downsampling.
 3. **Zeroing en ConvNeXt no compartida, ConvNeXt dp0 y Swin** (solo se ha hecho en shared). En la no compartida el canal emerge con la profundidad: ¿también es "pasivo" respecto a los demás?
 4. **Causalidad del droppath**: tasas intermedias, shared con dp=0, y comprobar la receta de los pesos torchvision de ResNet/Swin.

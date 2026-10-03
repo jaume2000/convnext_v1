@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=shared_allstages
-# boost_qos_lprod walltime cap; unused time is not charged and RETAKE=1 chains further.
-#SBATCH --time=4-00:00:00
+# Short segments schedule much sooner than the 4-day cap; chain with RETAKE=1.
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# Booster nodes are 32 cores (1x Xeon 8358) / 4 GPUs, so the 4 ranks get 8 dataloader
-# workers each (see available_cpus() in the train script); fewer just idles cores.
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+# Half a booster node (16 cores / 2 GPUs): on a full machine it fits where a whole
+# node cannot. 8 dataloader workers per rank (see available_cpus() in the train
+# script). Must match NPROC_PER_NODE below.
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:2
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/train_shared_convnext_allstages_%j.out
@@ -74,8 +75,8 @@ fi
 
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
-# 1, not 2: this is inherited by every dataloader worker, and the 32 workers already fill
-# the node's 32 cores on their own. The main processes only feed the GPUs, so they have no
+# 1, not 2: this is inherited by every dataloader worker, and the 16 workers already fill
+# the job's 16 cores on their own. The main processes only feed the GPUs, so they have no
 # use for a second thread either.
 export OMP_NUM_THREADS=1
 
@@ -99,7 +100,7 @@ fi
 # Not EXPERIMENT_NAME: .env points it at the D9 shared run, which this job must not touch.
 EXPERIMENT_NAME="${ALLSTAGES_EXPERIMENT_NAME:-shared_convnextv1_allstages_imagenet}"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 
 if [[ "${RETAKE}" == "1" ]]; then
   if [[ ! -f "${EXPERIMENT}/weights/last.pth" ]]; then

@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=convnextv1_deltav0_9to27
-# boost_qos_lprod walltime cap; unused time is not charged and RETAKE=1 chains further.
-#SBATCH --time=4-00:00:00
+# Short segments schedule much sooner than the 4-day cap; chain with RETAKE=1.
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# Full booster node: 32 cores / 4 GPUs, so each of 4 ranks gets 8 dataloader workers
-# (see available_cpus() in the train script). Must match NPROC_PER_NODE below.
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+# Half a booster node (16 cores / 2 GPUs): on a full machine it fits where a whole
+# node cannot. 8 dataloader workers per rank (see available_cpus() in the train
+# script). Must match NPROC_PER_NODE below.
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:2
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
 #SBATCH --output=logs/convnextv1_deltav0_9to27_imagenet_%j.out
@@ -73,8 +74,8 @@ fi
 
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${PROJECT_ROOT}:${VENV_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
-# 1, not 2: this is inherited by every dataloader worker, and the 32 workers already fill
-# the node's 32 cores on their own. The main processes only feed the GPUs, so they have no
+# 1, not 2: this is inherited by every dataloader worker, and the 16 workers already fill
+# the job's 16 cores on their own. The main processes only feed the GPUs, so they have no
 # use for a second thread either.
 export OMP_NUM_THREADS=1
 
@@ -101,7 +102,7 @@ fi
 EXPERIMENT_NAME="convnextv1_deltav0_9to27_imagenet"
 EXPERIMENT="${PROJECT_ROOT}/outputs/${EXPERIMENT_NAME}"
 PRETRAINED="${PROJECT_ROOT}/outputs/shared_convnextv1_imagenet/weights/last.pth"
-NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 
 # Both checks run before the ~150G of staging below, so a missing file costs seconds
 # instead of the best part of an hour.

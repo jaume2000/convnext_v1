@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 from pathlib import Path
 import torch
 import torch.distributed as dist
@@ -48,6 +49,7 @@ class Trainer():
     gradient_clipping: float | None = None,
     collapse_patience: int | None = 3,
     collapse_margin: float = 0.01,
+    grad_accum_steps: int = 1,
     retake: bool = False):
         self.experiment_name = experiment_name
         self.model = model
@@ -72,6 +74,12 @@ class Trainer():
         self._collapsed_epochs = 0
         self._collapse_armed = False
         self.retake = retake
+        if grad_accum_steps < 1:
+            raise ValueError(f"grad_accum_steps must be >= 1, got {grad_accum_steps}")
+        self.grad_accum_steps = grad_accum_steps
+        # A trailing partial group would step on fewer samples than the rest; dropping it
+        # also keeps optimizer steps per epoch equal to what the scheduler was built with.
+        self.steps_per_epoch = len(train_loader) // grad_accum_steps
         self.experiment_path = Path(f"outputs/{self.experiment_name}")
         self.weights_path = self.experiment_path / "weights"
         if device.type == "cuda":
@@ -177,30 +185,41 @@ class Trainer():
             mininterval=1.0,
             disable=not main,
         )
+        accum = self.grad_accum_steps
         for step, (batch, y_labels) in enumerate(pbar):
-            self.optimizer.zero_grad(set_to_none=True)
+            if step >= self.steps_per_epoch * accum:
+                break
+            if step % accum == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+            is_update = (step + 1) % accum == 0
+            # Only the last micro-batch of a group all-reduces; DDP needs the forward
+            # inside no_sync too, not just the backward.
+            sync = self.model.no_sync() if isinstance(self.model, DDP) and not is_update else nullcontext()
             batch = self._to_device(batch)
             y_labels = y_labels.to(self.device, non_blocking=True)
             batch, y_labels = self.batch_transforms(batch, y_labels)
-            with autocast("cuda", enabled=self.amp, dtype=torch.bfloat16):
-                pred = self.model(batch)
-                loss = self.criterion(pred, y_labels)
-            # A non-finite loss means the weights are already poisoned, so there is
-            # nothing left to salvage by running the backward.
-            if step % self.log_every == 0 and not torch.isfinite(loss).item():
-                raise RuntimeError(
-                    f"Non-finite train loss ({loss.item()}) at epoch {epoch + 1}, step {step}. "
-                    + self._resume_hint()
-                )
-            loss.backward()
-            grad_norm = self._checked_grad_norm(epoch, step)
-            if self.gradient_clipping is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
-            self.optimizer.step()
-            if hasattr(model, "reparametrize"):
-                model.reparametrize()
-            if self.scheduler is not None and not self.scheduler_per_epoch:
-                self.scheduler.step()
+            with sync:
+                with autocast("cuda", enabled=self.amp, dtype=torch.bfloat16):
+                    pred = self.model(batch)
+                    loss = self.criterion(pred, y_labels)
+                # A non-finite loss means the weights are already poisoned, so there is
+                # nothing left to salvage by running the backward.
+                if step % self.log_every == 0 and not torch.isfinite(loss).item():
+                    raise RuntimeError(
+                        f"Non-finite train loss ({loss.item()}) at epoch {epoch + 1}, step {step}. "
+                        + self._resume_hint()
+                    )
+                (loss / accum).backward()
+            grad_norm = None
+            if is_update:
+                grad_norm = self._checked_grad_norm(epoch, step)
+                if self.gradient_clipping is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clipping)
+                self.optimizer.step()
+                if hasattr(model, "reparametrize"):
+                    model.reparametrize()
+                if self.scheduler is not None and not self.scheduler_per_epoch:
+                    self.scheduler.step()
             if not main:
                 continue
             train_history_metrics.accumulate(
@@ -302,7 +321,7 @@ class Trainer():
         if self.scheduler is not None and not self.scheduler_per_epoch:
             # Derived from the epoch rather than stored, so the schedule stays correct
             # even for checkpoints written before it existed.
-            self.scheduler.set_step(start_epoch * len(self.train_loader))
+            self.scheduler.set_step(start_epoch * self.steps_per_epoch)
         if self._is_main_process():
             print(f"Retake: loaded {ckpt_name}.pth, resuming at epoch {start_epoch + 1}")
         return start_epoch
