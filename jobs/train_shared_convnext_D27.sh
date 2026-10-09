@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=shared_D27
 # Short segments schedule much sooner than the 4-day cap; chain with RETAKE=1.
-#SBATCH --time=12:00:00
+#SBATCH --time=9:45:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 # Half a booster node (16 cores / 2 GPUs): on a full machine it fits where a whole

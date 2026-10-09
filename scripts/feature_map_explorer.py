@@ -415,6 +415,10 @@ VIDEO_MAPS = [
     "l2_h",
     "h_CH",
     "x_CH",
+    "h_CH_W0",
+    "x_CH_W0",
+    "h_CH_Wlast",
+    "x_CH_Wlast",
     "scatter_ch_x",
     "scatter_ch_h",
     "scatter_h",
@@ -489,6 +493,13 @@ CH_CBAR_GAP_PX = 40  # gap for colorbar tick labels (drawn above the strip)
 CH_CBAR_PX = 18  # colorbar strip height
 CH_BOTTOM_PAD_PX = 10
 CH_GRID_PX_PER_CELL = 3  # smaller cells for multi-panel grids
+# C×H kind suffix → W column (front border, middle, back border).
+CH_CUT_W = {
+    "CH_W0": lambda w: 0,
+    "CH": lambda w: w // 2,
+    "CH_Wlast": lambda w: w - 1,
+}
+CH_KINDS = tuple(f"{field}_{cut}" for cut in CH_CUT_W for field in ("h", "x"))
 
 KIND_TITLES = {
     "h": "h_d = block(x_d) - x_d",
@@ -499,6 +510,10 @@ KIND_TITLES = {
     "l2_h": "||h_d[:,i,j] - h_{d+1}[:,i,j]||",
     "h_CH": "h_d C×H slice at W//2",
     "x_CH": "x_d C×H slice at W//2",
+    "h_CH_W0": "h_d C×H slice at W=0",
+    "x_CH_W0": "x_d C×H slice at W=0",
+    "h_CH_Wlast": "h_d C×H slice at W=W-1",
+    "x_CH_Wlast": "x_d C×H slice at W=W-1",
     "scatter_ch_x": "state vs channel: C → x_d",
     "scatter_ch_h": "field vs channel: C → h_d (= Δx_d / ES)",
     "scatter_h": "residual field: x_d → h_d (= Δx_d / ES)",
@@ -1718,7 +1733,7 @@ def draw_style(maps: torch.Tensor, kind: str) -> dict:
         cmap = CMAP_NORM
         vmax = _finite_max() if SHARED_SCALE else None
         return {"cmap": cmap, "vmin": 0.0, **({"vmax": vmax} if vmax is not None else {})}
-    signed = kind in ("h", "h_CH")
+    signed = kind == "h" or (kind in CH_KINDS and kind[0] == "h")
     cmap = CMAP_H if signed else CMAP_X
     if not SHARED_SCALE:
         return {"cmap": cmap}
@@ -1728,9 +1743,9 @@ def draw_style(maps: torch.Tensor, kind: str) -> dict:
     return {"cmap": cmap, "vmin": _finite_min(), "vmax": _finite_max()}
 
 
-def ch_cut(maps: torch.Tensor) -> torch.Tensor:
-    """Slice at W//2 → [T, H, C]: x=channel (vertical lines), y=spatial H."""
-    w = maps.shape[-1] // 2
+def ch_cut(maps: torch.Tensor, cut: str = "CH") -> torch.Tensor:
+    """Slice at the ``CH_CUT_W[cut]`` W column → [T, H, C]: x=channel, y=spatial H."""
+    w = CH_CUT_W[cut](maps.shape[-1])
     return maps[..., w].permute(0, 2, 1)
 
 
@@ -1830,7 +1845,7 @@ def render_frames(
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     style = draw_style(maps, kind)
-    is_ch = kind.endswith("_CH")
+    is_ch = kind in CH_KINDS
     last = len(maps) - 1
     for d, frame in enumerate(maps):
         heading = frame_heading(run_name, formula, depth_line(kind, d, last))
@@ -1859,7 +1874,7 @@ def save_grid(maps: torch.Tensor, path: Path, *, title: str, kind: str, ncols: i
     ncols = min(ncols, n)
     nrows = -(-n // ncols)
     style = draw_style(maps, kind)
-    is_ch = kind.endswith("_CH")
+    is_ch = kind in CH_KINDS
     if is_ch:
         n_h, n_c = maps.shape[1], maps.shape[2]
         cell = CH_GRID_PX_PER_CELL
@@ -1987,8 +2002,8 @@ def write_video(frame_dir: Path, out_stem: Path, *, fps: float, n_frames: int) -
 
 
 def map_tensor(res: dict, kind: str) -> torch.Tensor:
-    if kind in ("h_CH", "x_CH"):
-        return ch_cut(res[f"mean_{kind[0]}"])
+    if kind in CH_KINDS:
+        return ch_cut(res[f"mean_{kind[0]}"], kind[2:])
     return res[kind]
 
 
@@ -3330,7 +3345,7 @@ def write_videos(res: dict, channels: list[int], run_dir: Path) -> None:
     fps = float(res["spec"]["fps"])
     run_name = res["name"]
     channel_kinds = [k for k in VIDEO_MAPS if k in ("h", "x")]
-    map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", "h_CH", "x_CH")]
+    map_kinds = [k for k in VIDEO_MAPS if k in ("cos_h", "cos_x", "norm_h", "l2_h", *CH_KINDS)]
     scatter_kinds = [
         k
         for k in VIDEO_MAPS
